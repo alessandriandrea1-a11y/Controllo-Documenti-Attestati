@@ -7,6 +7,7 @@ import dropbox
 import docx2txt
 import re
 from datetime import datetime
+import zoneinfo
 import base64
 from groq import Groq
 import pypdfium2 as pdfium
@@ -152,10 +153,13 @@ if azienda_selezionata:
         else:
             with st.spinner("🧠 Groq AI sta analizzando il documento..."):
                 try:
+                    # Calcolo dinamico della data di OGGI con fuso orario italiano
+                    fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
+                    data_oggi = datetime.now(fuso_orario).strftime("%d/%m/%Y")
+                    
                     file_bytes = file_caricato.read()
                     nome_file = file_caricato.name.lower()
                     client = Groq(api_key=api_key_inserita)
-                    data_oggi = datetime.now().strftime("%d/%m/%Y")
                     
                     testo_estratto = ""
                     
@@ -170,29 +174,44 @@ if azienda_selezionata:
                     testo_estratto = testo_estratto.strip()
 
                     if not testo_estratto:
-                        st.error("📄 Il PDF caricato non contiene testo selezionabile (è una scansione/immagine). Salvalo come PDF con testo per farlo analizzare.")
+                        st.error("📄 Il PDF caricato non contiene testo selezionabile. Salvalo come PDF stampabile/con testo.")
                     else:
-                        testo_ottimizzato = testo_estratto[:3000]
+                        testo_ottimizzato = testo_estratto[:3500]
 
                         prompt = f"""
-                        Analizza questo testo di un documento di sicurezza sul lavoro. Data odierna: {data_oggi}.
-                        
-                        ISTRUZIONI:
-                        - Se trovi solo MESE ed ANNO di scadenza (es: "Maggio 2028"), usa l'ultimo giorno del mese ("31/05/2028").
-                        - Estrai eventuali prescrizioni/limitazioni mediche.
-                        - Calcola lo stato: "🟢 In Regola", "🟡 In Scadenza", "🔴 Scaduto".
+                        Sei un esperto CSE di sicurezza sul lavoro. Analizza questo documento.
+                        LA DATA ODIERNA DI RIFERIMENTO È TASSATIVAMENTE: {data_oggi}.
 
-                        Rispondi ESCLUSIVAMENTE con un oggetto JSON valido. Non usare valori null, rispondi con stringhe vuote "" se un dato non è presente:
+                        ISTRUZIONI PRECISE:
+                        1. IDENTIFICAZIONE TIPOLOGIA:
+                           - Distingui se si tratta di "Attestato di Formazione" oppure "Idoneità Sanitaria/Visita Medica".
+                        
+                        2. DATA DI SCADENZA:
+                           - DISTINGUI la data di EROGAZIONE/SVOLGIMENTO del corso dalla DATA DI SCADENZA.
+                           - Se è un ATTESTATO DI FORMAZIONE (es. Ambienti Confinati, Antincendio, Primo Soccorso, Lavori in Quota, ecc.) e NON c'è scritta esplicitamente una data di scadenza, la data di scadenza SI CALCOLA aggiungendo 5 ANNI alla data del corso (es. corso effettuato il 11/05/2026 -> data di scadenza 11/05/2031).
+                           - Se è una VISITA MEDICA e trovi indicazioni del tipo "scadenza Maggio 2028", usa l'ultimo giorno di quel mese ("31/05/2028").
+
+                        3. STATO RISPETTO A OGGI ({data_oggi}):
+                           - Confronta la data di scadenza calcolata con la data odierna ({data_oggi}).
+                           - Se la data di scadenza è FUTURA (oltre 60 giorni da {data_oggi}): "🟢 In Regola"
+                           - Se la data di scadenza è entro i prossimi 60 giorni rispetto a {data_oggi}: "🟡 In Scadenza"
+                           - Se la data di scadenza è PASSATA/PRECEDENTE a {data_oggi}: "🔴 Scaduto"
+
+                        4. PRESCRIZIONI MEDICHE:
+                           - Rileva prescrizioni SOLO SE si tratta di Idoneità Sanitaria/Visita Medica.
+                           - Se è un corso di formazione/attestato, restituisci SEMPRE "Nessuna prescrizione rilevata".
+
+                        Rispondi ESCLUSIVAMENTE con un oggetto JSON valido:
                         {{
                             "lavoratore": "NOME COGNOME",
-                            "mansione": "MANSIONE",
-                            "documento_nome": "Nome Identificato del Documento",
-                            "data_scadenza": "DD/MM/AAAA oppure 'Illimitato'",
+                            "mansione": "MANSIONE (se assente inserisci 'Operaio')",
+                            "documento_nome": "Titolo/Tipo esatto del documento (es. Attestato Ambienti Confinati)",
+                            "data_scadenza": "DD/MM/AAAA",
                             "stato_calcolato": "🟢 In Regola / 🟡 In Scadenza / 🔴 Scaduto",
-                            "prescrizione_medica": "Testo prescrizioni oppure 'Nessuna prescrizione rilevata'"
+                            "prescrizione_medica": "Testo prescrizioni sanitarie oppure 'Nessuna prescrizione rilevata'"
                         }}
 
-                        TESTO:
+                        TESTO DOCUMENTO:
                         {testo_ottimizzato}
                         """
 
@@ -216,10 +235,9 @@ if azienda_selezionata:
                         risposta_testo = chat_completion.choices[0].message.content
                         dati_ai = json.loads(risposta_testo)
                         
-                        # Estrazione protetta contro valori None/null
                         nom_lav = (dati_ai.get("lavoratore") or "Sconosciuto").strip()
-                        mans_lav = (dati_ai.get("mansione") or "Non specificata").strip()
-                        doc_nome = (dati_ai.get("documento_nome") or "Documento Generico").strip()
+                        mans_lav = (dati_ai.get("mansione") or "Operaio").strip()
+                        doc_nome = (dati_ai.get("documento_nome") or "Attestato Formazione").strip()
                         data_scad = (dati_ai.get("data_scadenza") or "Illimitato").strip()
                         stato_calc = (dati_ai.get("stato_calcolato") or "🟢 In Regola").strip()
                         prescr_raw = dati_ai.get("prescrizione_medica")
