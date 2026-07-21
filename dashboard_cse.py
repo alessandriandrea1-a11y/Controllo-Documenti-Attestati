@@ -201,7 +201,7 @@ if azienda_selezionata:
                                 ]
                             }
                         ]
-                        model_to_use = "llama-3.2-11b-vision-preview"
+                        model_to_use = "llama-3.2-90b-vision-preview"
 
                     elif nome_file.endswith((".png", ".jpg", ".jpeg")):
                         base64_image = base64.b64encode(file_bytes).decode('utf-8')
@@ -215,7 +215,7 @@ if azienda_selezionata:
                                 ]
                             }
                         ]
-                        model_to_use = "llama-3.2-11b-vision-preview"
+                        model_to_use = "llama-3.2-90b-vision-preview"
 
                     elif nome_file.endswith(".docx"):
                         testo_word = docx2txt.process(io.BytesIO(file_bytes))
@@ -287,13 +287,13 @@ if azienda_selezionata:
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.markdown(f'<div class="metric-card"><h3>👥 Forza Lavoro Totale</h3>## {tot_lav}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card"><h3>👥 Forza Lavoro Totale</h3><h2>{tot_lav}</h2></div>', unsafe_allow_html=True)
         with col2:
-            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #4caf50;"><h3>🟢 Abilitati all\'Ingresso</h3>## {abilitati}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #4caf50;"><h3>🟢 Abilitati all\'Ingresso</h3><h2>{abilitati}</h2></div>', unsafe_allow_html=True)
         with col3:
-            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #ff9800;"><h3>🟡 Da Monitorare</h3>## {monitorare}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #ff9800;"><h3>🟡 Da Monitorare</h3><h2>{monitorare}</h2></div>', unsafe_allow_html=True)
         with col4:
-            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #f44336;"><h3>🔴 Interdetti (Bloccati)</h3>## {interdetti}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #f44336;"><h3>🔴 Interdetti (Bloccati)</h3><h2>{interdetti}</h2></div>', unsafe_allow_html=True)
         
         st.write("---")
         
