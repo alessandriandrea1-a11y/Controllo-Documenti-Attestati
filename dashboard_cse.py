@@ -9,6 +9,7 @@ import re
 from datetime import datetime
 import base64
 from groq import Groq
+import pypdfium2 as pdfium
 
 st.set_page_config(layout="wide", page_title="Dashboard CSE — Controllo Totale Diretto")
 
@@ -135,7 +136,7 @@ with st.sidebar:
                     
         st.write("---")
         st.markdown("### 📤 LETTORE AUTOMATICO MULTIMODALE")
-        file_caricato = st.file_uploader("Carica Documento (PNG, JPG, DOCX)", type=["png", "jpg", "jpeg", "docx"])
+        file_caricato = st.file_uploader("Carica Documento (PDF, PNG, JPG, DOCX)", type=["pdf", "png", "jpg", "jpeg", "docx"])
     else:
         file_caricato = None
 
@@ -149,7 +150,7 @@ if azienda_selezionata:
         if not api_key_inserita:
             st.error("🚨 Inserisci la tua chiave API Groq (gsk_...) a sinistra per elaborare il documento!")
         else:
-            with st.spinner("🧠 Groq AI sta analizzando il documento a velocità massima..."):
+            with st.spinner("🧠 Groq AI sta analizzando il documento (PDF / Immagine)..."):
                 try:
                     file_bytes = file_caricato.read()
                     nome_file = file_caricato.name.lower()
@@ -171,7 +172,7 @@ if azienda_selezionata:
                     4. Calcola lo stato rispetto al {data_oggi}: "🟢 In Regola", "🟡 In Scadenza", "🔴 Scaduto".
                     5. PRESCRIZIONI MEDICHE: Se presenti estraile dettagliatamente. Se non ce ne sono, restituisci null.
 
-                    Rispondi ESCLUSIVAMENTE con un oggetto JSON valido (senza markdown o altro testo):
+                    Rispondi ESCLUSIVAMENTE con un oggetto JSON valido:
                     {{
                         "lavoratore": "NOME COGNOME",
                         "mansione": "MANSIONE",
@@ -182,7 +183,27 @@ if azienda_selezionata:
                     }}
                     """
 
-                    if nome_file.endswith((".png", ".jpg", ".jpeg")):
+                    if nome_file.endswith(".pdf"):
+                        # Converte la prima pagina del PDF in un'immagine per Groq Vision
+                        pdf = pdfium.PdfDocument(file_bytes)
+                        page = pdf[0] # Prima pagina
+                        image = page.render(scale=2).to_pil()
+                        img_byte_arr = io.BytesIO()
+                        image.save(img_byte_arr, format='PNG')
+                        base64_image = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+                        
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_image}"}}
+                                ]
+                            }
+                        ]
+                        model_to_use = "llama-3.2-11b-vision-preview"
+
+                    elif nome_file.endswith((".png", ".jpg", ".jpeg")):
                         base64_image = base64.b64encode(file_bytes).decode('utf-8')
                         mime = "image/png" if nome_file.endswith(".png") else "image/jpeg"
                         messages = [
@@ -195,13 +216,11 @@ if azienda_selezionata:
                             }
                         ]
                         model_to_use = "llama-3.2-11b-vision-preview"
+
                     elif nome_file.endswith(".docx"):
                         testo_word = docx2txt.process(io.BytesIO(file_bytes))
                         messages = [{"role": "user", "content": f"{prompt}\n\nContenuto del documento:\n{testo_word}"}]
                         model_to_use = "llama-3.3-70b-versatile"
-                    else:
-                        st.error("Per immagini/scansioni usa JPG o PNG, oppure carica documenti Word (.docx).")
-                        st.stop()
 
                     chat_completion = client.chat.completions.create(
                         messages=messages,
@@ -268,13 +287,13 @@ if azienda_selezionata:
         
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.markdown(f'<div class="metric-card"><h3>👥 Forza Lavoro Totale</h3><h2>{tot_lav}</h2></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card"><h3>👥 Forza Lavoro Totale</h3>## {tot_lav}</div>', unsafe_allow_html=True)
         with col2:
-            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #4caf50;"><h3>🟢 Abilitati all\'Ingresso</h3><h2>{abilitati}</h2></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #4caf50;"><h3>🟢 Abilitati all\'Ingresso</h3>## {abilitati}</div>', unsafe_allow_html=True)
         with col3:
-            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #ff9800;"><h3>🟡 Da Monitorare</h3><h2>{monitorare}</h2></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #ff9800;"><h3>🟡 Da Monitorare</h3>## {monitorare}</div>', unsafe_allow_html=True)
         with col4:
-            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #f44336;"><h3>🔴 Interdetti (Bloccati)</h3><h2>{interdetti}</h2></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #f44336;"><h3>🔴 Interdetti (Bloccati)</h3>## {interdetti}</div>', unsafe_allow_html=True)
         
         st.write("---")
         
