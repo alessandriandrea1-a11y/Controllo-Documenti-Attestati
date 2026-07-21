@@ -1,5 +1,4 @@
+google-genai
 streamlit
 pandas
-google-genai
 dropbox
-docx2txt
