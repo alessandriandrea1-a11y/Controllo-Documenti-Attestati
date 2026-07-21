@@ -34,7 +34,7 @@ def upload_db_to_dropbox():
             with open(DB_FILE_NAME, "rb") as f:
                 dbx.files_upload(f.read(), f"/{DB_FILE_NAME}", mode=dropbox.files.WriteMode.overwrite)
         except Exception as e:
-            st.error(f"Errore nel salvataggio su Dropbox: {e}")
+            st.error(f"⚠️ Errore nel salvataggio su Dropbox: {e}")
 
 download_db_from_dropbox()
 
@@ -150,7 +150,7 @@ if azienda_selezionata:
         if not api_key_inserita:
             st.error("🚨 Inserisci la tua chiave API Groq (gsk_...) a sinistra per elaborare il documento!")
         else:
-            with st.spinner("🧠 Groq AI sta analizzando il testo del documento..."):
+            with st.spinner("🧠 Groq AI sta analizzando il documento..."):
                 try:
                     file_bytes = file_caricato.read()
                     nome_file = file_caricato.name.lower()
@@ -167,22 +167,21 @@ if azienda_selezionata:
                     elif nome_file.endswith(".docx"):
                         testo_estratto = docx2txt.process(io.BytesIO(file_bytes))
 
-                    if not testo_estratto.strip():
-                        st.error("⚠️ Nessun testo rilevato nel PDF. Se è una scansione o una foto, salvala come file con testo o PDF nativo.")
-                    else:
-                        prompt = f"""
-                        Analizza questo testo estratto da un documento di sicurezza sul lavoro o idoneità sanitaria. La data odierna di riferimento è il {data_oggi}.
-                        
-                        ISTRUZIONI SPECIALI DI LETTURA CRITICA:
-                        - Se trovi solo MESE ed ANNO di scadenza (es: "Maggio 2028", "06/2027"), interpretalo come l'ultimo giorno di quel mese (es: "31/05/2028", "30/06/2027").
-                        - Cerca attentamente nel testo qualsiasi "limitazione", "prescrizione", nota o dicitura come "con prescrizione", "adibito a con la condizione di...". Estrai l'intera frase in modo chiaro.
+                    testo_estratto = testo_estratto.strip()
 
-                        Compiti di analisi:
-                        1. Trova Nome e Cognome del lavoratore e la mansione.
-                        2. Identifica il tipo preciso di documento.
-                        3. CALCOLA/ESTRAI LA DATA DI SCADENZA (anche se desunta da mese/anno).
-                        4. Calcola lo stato rispetto al {data_oggi}: "🟢 In Regola", "🟡 In Scadenza", "🔴 Scaduto".
-                        5. PRESCRIZIONI MEDICHE: Se presenti estraile dettagliatamente. Se non ce ne sono, restituisci null.
+                    if not testo_estratto:
+                        st.error("📄 Il PDF caricato non contiene testo selezionabile (è una scansione/immagine). Salvalo come PDF con testo per farlo analizzare.")
+                    else:
+                        # Troncamento intelligente per risparmiare token
+                        testo_ottimizzato = testo_estratto[:3000]
+
+                        prompt = f"""
+                        Analizza questo testo di un documento di sicurezza sul lavoro. Data odierna: {data_oggi}.
+                        
+                        ISTRUZIONI:
+                        - Se trovi solo MESE ed ANNO di scadenza (es: "Maggio 2028"), usa l'ultimo giorno del mese ("31/05/2028").
+                        - Estrai eventuali prescrizioni/limitazioni mediche.
+                        - Calcola lo stato: "🟢 In Regola", "🟡 In Scadenza", "🔴 Scaduto".
 
                         Rispondi ESCLUSIVAMENTE con un oggetto JSON valido:
                         {{
@@ -191,62 +190,81 @@ if azienda_selezionata:
                             "documento_nome": "Nome Identificato del Documento",
                             "data_scadenza": "DD/MM/AAAA oppure 'Illimitato'",
                             "stato_calcolato": "🟢 In Regola / 🟡 In Scadenza / 🔴 Scaduto",
-                            "prescrizione_medica": "Testo dettagliato delle prescrizioni/limitazioni estratte o null"
+                            "prescrizione_medica": "Testo prescrizioni oppure null"
                         }}
 
-                        TESTO DOCUMENTO:
-                        {testo_estratto}
+                        TESTO:
+                        {testo_ottimizzato}
                         """
 
-                        chat_completion = client.chat.completions.create(
-                            messages=[{"role": "user", "content": prompt}],
-                            model="llama-3.3-70b-versatile",
-                            response_format={"type": "json_object"}
-                        )
+                        # Tentativo prioritario con modello principale, fallback automatico su 8b se va in rate-limit
+                        try:
+                            chat_completion = client.chat.completions.create(
+                                messages=[{"role": "user", "content": prompt}],
+                                model="llama-3.3-70b-versatile",
+                                response_format={"type": "json_object"}
+                            )
+                        except Exception as req_err:
+                            if "429" in str(req_err) or "rate_limit" in str(req_err):
+                                st.info("ℹ️ Limite giornaliero raggiunto sul modello 70B: utilizzo del modello veloce di riserva (Llama 3.1 8B)...")
+                                chat_completion = client.chat.completions.create(
+                                    messages=[{"role": "user", "content": prompt}],
+                                    model="llama-3.1-8b-instant",
+                                    response_format={"type": "json_object"}
+                                )
+                            else:
+                                raise req_err
                         
                         risposta_testo = chat_completion.choices[0].message.content
                         dati_ai = json.loads(risposta_testo)
                         
+                        nom_lav = dati_ai.get("lavoratore", "Sconosciuto").strip()
+                        mans_lav = dati_ai.get("mansione", "Non specificata").strip()
+                        doc_nome = dati_ai.get("documento_nome", "Documento Generico").strip()
+                        data_scad = dati_ai.get("data_scadenza", "Illimitato").strip()
+                        stato_calc = dati_ai.get("stato_calcolato", "🟢 In Regola").strip()
+                        prescr = dati_ai.get("prescrizione_medica") if dati_ai.get("prescrizione_medica") else 'Nessuna prescrizione rilevata'
+                        
                         cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
-                        az_id = cursor.fetchone()[0]
-                        
-                        cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND LOWER(nominativo) = LOWER(?)", (az_id, dati_ai["lavoratore"].strip()))
-                        operaio_db = cursor.fetchone()
-                        
-                        prescr = dati_ai["prescrizione_medica"] if dati_ai["prescrizione_medica"] else 'Nessuna prescrizione rilevata'
-                        
-                        if operaio_db:
-                            op_id = operaio_db[0]
-                            if dati_ai["prescrizione_medica"]:
-                                cursor.execute("UPDATE lavoratori SET prescrizioni_mediche = ? WHERE id = ?", (prescr, op_id))
-                        else:
-                            cursor.execute("INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche) VALUES (?, ?, ?, '🔴 Da Verificare', ?)", (az_id, dati_ai["lavoratore"].strip(), dati_ai["mansione"], prescr))
+                        az_row = cursor.fetchone()
+                        if az_row:
+                            az_id = az_row[0]
+                            
+                            cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND LOWER(nominativo) = LOWER(?)", (az_id, nom_lav))
+                            operaio_db = cursor.fetchone()
+                            
+                            if operaio_db:
+                                op_id = operaio_db[0]
+                                if prescr != 'Nessuna prescrizione rilevata':
+                                    cursor.execute("UPDATE lavoratori SET prescrizioni_mediche = ? WHERE id = ?", (prescr, op_id))
+                            else:
+                                cursor.execute("INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche) VALUES (?, ?, ?, '🔴 Da Verificare', ?)", (az_id, nom_lav, mans_lav, prescr))
+                                conn.commit()
+                                op_id = cursor.lastrowid
+                            
+                            stato_pulito = stato_calc.split("(")[0].strip()
+                            
+                            cursor.execute("""
+                                INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
+                                VALUES (?, ?, ?, ?)
+                                ON CONFLICT(lavoratore_id, tipo_documento) 
+                                DO UPDATE SET stato_scadenza=excluded.stato_scadenza, data_scadenza=excluded.data_scadenza
+                            """, (op_id, doc_nome, stato_pulito, data_scad))
+                            
+                            cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
+                            tutti_stati = [r[0] for r in cursor.fetchall()]
+                            stringa_totale = "".join(tutti_stati)
+                            nuovo_accesso = "🔴 INTERDETTO" if "🔴" in stringa_totale else ("🟡 MONITORARE" if "🟡" in stringa_totale else "🟢 ABILITATO")
+                            
+                            cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, op_id))
                             conn.commit()
-                            op_id = cursor.lastrowid
-                        
-                        stato_pulito = dati_ai["stato_calcolato"].split("(")[0].strip()
-                        
-                        cursor.execute("""
-                            INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
-                            VALUES (?, ?, ?, ?)
-                            ON CONFLICT(lavoratore_id, tipo_documento) 
-                            DO UPDATE SET stato_scadenza=excluded.stato_scadenza, data_scadenza=excluded.data_scadenza
-                        """, (op_id, dati_ai["documento_nome"], stato_pulito, dati_ai["data_scadenza"]))
-                        
-                        cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
-                        tutti_stati = [r[0] for r in cursor.fetchall()]
-                        stringa_totale = "".join(tutti_stati)
-                        nuovo_accesso = "🔴 INTERDETTO" if "🔴" in stringa_totale else ("🟡 MONITORARE" if "🟡" in stringa_totale else "🟢 ABILITATO")
-                        
-                        cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, op_id))
-                        conn.commit()
-                        
-                        upload_db_to_dropbox()
-                        st.success(f"🎉 Registrato/Aggiornato con Groq: {dati_ai['documento_nome']} per {dati_ai['lavoratore']}")
-                        st.rerun()
+                            
+                            upload_db_to_dropbox()
+                            st.success(f"🎉 Registrato con successo: **{doc_nome}** per **{nom_lav}**")
+                            st.rerun()
                     
                 except Exception as e:
-                    st.error(f"Errore durante l'elaborazione AI: {str(e)}")
+                    st.error(f"⚠️ Errore durante l'elaborazione AI: {str(e)}")
 
     # --- REPERIMENTO E VISUALIZZAZIONE DATI ---
     cursor.execute("""
