@@ -3,6 +3,8 @@ import pandas as pd
 import sqlite3
 import json
 import io
+import os
+import zipfile
 import dropbox
 import docx2txt
 import re
@@ -18,20 +20,29 @@ st.set_page_config(layout="wide", page_title="Dashboard CSE — Controllo Totale
 DROPBOX_TOKEN = st.secrets.get("DROPBOX_TOKEN", "IL_TUO_TOKEN_TEMPORANEO_QUI")
 DB_FILE_NAME = "database_sicurezza.db"
 
-def download_db_from_dropbox():
+def get_dropbox_client():
     if DROPBOX_TOKEN and DROPBOX_TOKEN != "IL_TUO_TOKEN_TEMPORANEO_QUI":
         try:
-            dbx = dropbox.Dropbox(DROPBOX_TOKEN)
+            return dropbox.Dropbox(DROPBOX_TOKEN)
+        except Exception as e:
+            st.error(f"⚠️ Errore connessione Dropbox: {e}")
+            return None
+    return None
+
+def download_db_from_dropbox():
+    dbx = get_dropbox_client()
+    if dbx:
+        try:
             metadata, res = dbx.files_download(f"/{DB_FILE_NAME}")
             with open(DB_FILE_NAME, "wb") as f:
                 f.write(res.content)
-        except Exception as e:
+        except Exception:
             pass
 
 def upload_db_to_dropbox():
-    if DROPBOX_TOKEN and DROPBOX_TOKEN != "IL_TUO_TOKEN_TEMPORANEO_QUI":
+    dbx = get_dropbox_client()
+    if dbx:
         try:
-            dbx = dropbox.Dropbox(DROPBOX_TOKEN)
             with open(DB_FILE_NAME, "rb") as f:
                 dbx.files_upload(f.read(), f"/{DB_FILE_NAME}", mode=dropbox.files.WriteMode.overwrite)
         except Exception as e:
@@ -39,7 +50,7 @@ def upload_db_to_dropbox():
 
 download_db_from_dropbox()
 
-# --- DATABASE LOCAL SQLITE E CREAZIONE TABELLE GARANTITA ---
+# --- DATABASE LOCAL SQLITE E CREAZIONE TABELLE ---
 conn = sqlite3.connect(DB_FILE_NAME, check_same_thread=False)
 cursor = conn.cursor()
 
@@ -47,7 +58,8 @@ def inizializza_db():
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS aziende (
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        nome TEXT UNIQUE
+        nome TEXT UNIQUE,
+        percorso_dropbox TEXT DEFAULT ''
     )
     """)
     cursor.execute("""
@@ -113,6 +125,161 @@ def normalizza_nome_documento(testo_doc):
     else:
         return testo_doc.strip().title()
 
+def estrai_testo_da_bytes(file_bytes, nome_file):
+    testo = ""
+    nome_lower = nome_file.lower()
+    try:
+        if nome_lower.endswith(".pdf"):
+            pdf = pdfium.PdfDocument(file_bytes)
+            for page in pdf:
+                textpage = page.get_textpage()
+                testo += textpage.get_text_range() + "\n"
+        elif nome_lower.endswith(".docx"):
+            testo = docx2txt.process(io.BytesIO(file_bytes))
+    except Exception as e:
+        pass
+    return testo.strip()
+
+def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_selezionata):
+    nome_lower = nome_file.lower()
+    
+    # Se il file è uno ZIP, estraiamo tutti i PDF/DOCX contenuti all'interno
+    if nome_lower.endswith(".zip"):
+        risultati = []
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+                for filename in z.namelist():
+                    if filename.lower().endswith(('.pdf', '.docx')) and not filename.startswith('__MACOSX'):
+                        unzipped_bytes = z.read(filename)
+                        res = elabora_singolo_documento_con_ai(unzipped_bytes, os.path.basename(filename), client, azienda_selezionata)
+                        if res:
+                            risultati.append(res)
+            return f"ZIP elaborato ({len(risultati)} file utili trovati)"
+        except Exception as e:
+            return f"Errore ZIP: {str(e)}"
+
+    if not (nome_lower.endswith(".pdf") or nome_lower.endswith(".docx")):
+        return None
+
+    testo_estratto = estrai_testo_da_bytes(file_bytes, nome_file)
+    if not testo_estratto:
+        return "Nessun testo estraibile"
+
+    fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
+    data_oggi = datetime.now(fuso_orario).strftime("%d/%m/%Y")
+    testo_ottimizzato = testo_estratto[:3500]
+
+    prompt = f"""
+    Sei un esperto CSE di sicurezza sul lavoro. Analizza questo documento.
+    LA DATA ODIERNA DI RIFERIMENTO È TASSATIVAMENTE: {data_oggi}.
+
+    STEP 1 - FILTRO PERTINENZA:
+    Determina se questo documento riguarda un SINGOLO LAVORATORE (es. Attestato Formazione, Visita Medica, Idoneità, Abilitazione, Nomina).
+    Se è un documento AZIENDALE generale (es. POS, DURC, Visura Camerale, Fattura, Verbale, Valutazione Rischi, Nomina RSPP Generale), imposta "documento_pertinente": false.
+
+    STEP 2 - ESTRAZIONE (Solo se "documento_pertinente": true):
+    1. NOME LAVORATORE: Nome e Cognome esatto della persona (es. "MAHMOUD ALI EZZAT ALI"). No corsi o parentesi.
+    2. DATA DI SCADENZA:
+       - Se è un ATTESTATO DI FORMAZIONE e non c'è la scadenza esplicita, CALCOLA aggiungendo 5 ANNI alla data del corso.
+       - Se è VISITA MEDICA / IDONEITÀ, usa la data espressa.
+    3. STATO RISPETTO A OGGI ({data_oggi}):
+       - Futura (>60 giorni da {data_oggi}): "In Regola"
+       - Prossimi 60 giorni: "In Scadenza"
+       - Passata rispetto a {data_oggi}: "Scaduto"
+    4. PRESCRIZIONI MEDICHE: solo per idoneità/visite mediche, altrimenti "Nessuna prescrizione rilevata".
+
+    Rispondi ESCLUSIVAMENTE in JSON:
+    {{
+        "documento_pertinente": true,
+        "lavoratore": "NOME COGNOME",
+        "mansione": "MANSIONE (es. Operaio)",
+        "documento_nome": "Nome esatto corso/documento",
+        "data_scadenza": "DD/MM/AAAA",
+        "stato_calcolato": "In Regola / In Scadenza / Scaduto",
+        "prescrizione_medica": "Nessuna prescrizione rilevata"
+    }}
+    """
+
+    try:
+        try:
+            chat_completion = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama-3.3-70b-versatile",
+                response_format={"type": "json_object"}
+            )
+        except Exception:
+            chat_completion = client.chat.completions.create(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama-3.1-8b-instant",
+                response_format={"type": "json_object"}
+            )
+
+        dati_ai = json.loads(chat_completion.choices[0].message.content)
+
+        # Se il documento è un POS/DURC/Visura viene ignorato
+        if not dati_ai.get("documento_pertinente", True):
+            return "Documento aziendale ignorato (non è un attestato dipendente)"
+
+        nom_lav = pulisci_nome_rigido(dati_ai.get("lavoratore"))
+        mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
+        doc_grezzo = (dati_ai.get("documento_nome") or "Attestato Formazione").strip()
+        doc_nome = normalizza_nome_documento(doc_grezzo)
+        data_scad = (dati_ai.get("data_scadenza") or "Illimitato").strip()
+
+        stato_raw = str(dati_ai.get("stato_calcolato", "")).lower()
+        if "scaduto" in stato_raw:
+            stato_calc = "🔴 Scaduto"
+        elif "scadenza" in stato_raw:
+            stato_calc = "🟡 In Scadenza"
+        else:
+            stato_calc = "🟢 In Regola"
+
+        prescr_raw = dati_ai.get("prescrizione_medica")
+        prescr = prescr_raw.strip() if (prescr_raw and str(prescr_raw).lower() != "null") else 'Nessuna prescrizione rilevata'
+
+        cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
+        az_row = cursor.fetchone()
+        if az_row:
+            az_id = az_row[0]
+            
+            cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND UPPER(nominativo) = ?", (az_id, nom_lav))
+            operaio_db = cursor.fetchone()
+            
+            if operaio_db:
+                op_id = operaio_db[0]
+                if prescr != 'Nessuna prescrizione rilevata':
+                    cursor.execute("UPDATE lavoratori SET prescrizioni_mediche = ? WHERE id = ?", (prescr, op_id))
+            else:
+                cursor.execute("INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche) VALUES (?, ?, ?, '🔴 Da Verificare', ?)", (az_id, nom_lav, mans_lav, prescr))
+                conn.commit()
+                op_id = cursor.lastrowid
+            
+            cursor.execute("DELETE FROM documenti_lavoratori WHERE lavoratore_id = ? AND tipo_documento = ?", (op_id, doc_nome))
+            cursor.execute("""
+                INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
+                VALUES (?, ?, ?, ?)
+            """, (op_id, doc_nome, stato_calc, data_scad))
+            
+            cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
+            tutti_stati = [r[0] for r in cursor.fetchall()]
+            stringa_totale = "".join(tutti_stati)
+            
+            if "🔴" in stringa_totale:
+                nuovo_accesso = "🔴 INTERDETTO"
+            elif "🟡" in stringa_totale:
+                nuovo_accesso = "🟡 MONITORARE"
+            else:
+                nuovo_accesso = "🟢 ABILITATO"
+            
+            cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, op_id))
+            conn.commit()
+            upload_db_to_dropbox()
+
+            return f"Registrato: {doc_nome} - {nom_lav}"
+
+    except Exception as e:
+        return f"Errore AI: {str(e)}"
+
 # Grafica CSS
 st.markdown("""
     <style>
@@ -137,10 +304,10 @@ with st.sidebar:
     
     if api_key_manuale.strip() != "":
         api_key_inserita = api_key_manuale.strip()
-        st.success("🔑 Usando l'API Key Groq inserita a mano!")
+        st.success("🔑 API Key Groq Manuale attiva!")
     elif api_key_segreta:
         api_key_inserita = api_key_segreta
-        st.info("🤖 Usando l'API Key dai Secrets.")
+        st.info("🤖 API Key da Secrets attiva.")
     else:
         api_key_inserita = ""
 
@@ -161,16 +328,17 @@ with st.sidebar:
     st.markdown("### 🏢 AZIENDE IN CANTIERE")
     cursor.execute("SELECT nome FROM aziende ORDER BY nome ASC")
     lista_aziende = [riga[0] for riga in cursor.fetchall()]
-    
     azienda_selezionata = st.selectbox("Seleziona l'azienda:", lista_aziende) if lista_aziende else None
         
     if ha_permesso_modifica:
         st.write("---")
         st.markdown("#### 🏢 Configurazione Cantiere")
         nuova_azienda = st.text_input("Aggiungi Nuova Ditta:").strip()
+        percorso_dbx_nuova = st.text_input("Percorso Cartella Dropbox Ditta (es. /Cantiere/Ditta_A):").strip()
+        
         if st.button("Salva Azienda") and nuova_azienda:
             try:
-                cursor.execute("INSERT INTO aziende (nome) VALUES (?)", (nuova_azienda,))
+                cursor.execute("INSERT INTO aziende (nome, percorso_dropbox) VALUES (?, ?)", (nuova_azienda, percorso_dbx_nuova))
                 conn.commit()
                 upload_db_to_dropbox()
                 st.success("Azienda registrata!")
@@ -179,8 +347,8 @@ with st.sidebar:
                 st.error("Esiste già.")
                     
         st.write("---")
-        st.markdown("### 📤 LETTORE AUTOMATICO MULTIMODALE")
-        file_caricato = st.file_uploader("Carica Documento (PDF, DOCX)", type=["pdf", "docx"], key=f"uploader_{st.session_state['uploader_key']}")
+        st.markdown("### 📤 UPLOAD MANUALE (PDF, DOCX, ZIP)")
+        file_caricato = st.file_uploader("Carica File o Archivio ZIP", type=["pdf", "docx", "zip"], key=f"uploader_{st.session_state['uploader_key']}")
     else:
         file_caricato = None
 
@@ -190,159 +358,63 @@ if azienda_selezionata:
     st.markdown(f"### 🏢 Impresa in analisi: **{azienda_selezionata}**")
     st.write("---")
     
+    # PERCORSO DROPBOX ASSOCIATO ALL'AZIENDA
+    cursor.execute("SELECT percorso_dropbox FROM aziende WHERE nome = ?", (azienda_selezionata,))
+    row_p = cursor.fetchone()
+    percorso_dropbox_ditta = row_p[0] if row_p else ""
+
+    if ha_permesso_modifica:
+        c_left, c_right = st.columns(2)
+        
+        with c_left:
+            st.markdown("#### 📦 Analisi Automatica Cartella Dropbox")
+            if percorso_dropbox_ditta:
+                st.caption(f"Cartella collegata: `{percorso_dropbox_ditta}`")
+                if st.button("🚀 SCANSIONA ED ELABORA TUTTI I FILE DELLA CARTELLA DROPBOX"):
+                    dbx = get_dropbox_client()
+                    if not dbx:
+                        st.error("⚠️ Nessun Token Dropbox configurato.")
+                    elif not api_key_inserita:
+                        st.error("🚨 Manca la Groq API Key!")
+                    else:
+                        with st.spinner("📦 Scansione cartella Dropbox ed elaborazione AI in corso..."):
+                            client = Groq(api_key=api_key_inserita)
+                            try:
+                                res = dbx.files_list_folder(percorso_dropbox_ditta, recursive=True)
+                                file_list = res.entries
+                                processed = 0
+                                
+                                for entry in file_list:
+                                    if isinstance(entry, dropbox.files.FileMetadata):
+                                        if entry.name.lower().endswith(('.pdf', '.docx', '.zip')):
+                                            st.write(f"🔄 Lettura file: `{entry.name}`...")
+                                            _, file_res = dbx.files_download(entry.path_lower)
+                                            f_bytes = file_res.content
+                                            msg = elabora_singolo_documento_con_ai(f_bytes, entry.name, client, azienda_selezionata)
+                                            if msg:
+                                                st.info(f"➡️ {entry.name}: {msg}")
+                                                processed += 1
+                                st.success(f"✅ Scansione completata su {processed} file trovati.")
+                                st.rerun()
+                            except Exception as ex_dbx:
+                                st.error(f"⚠️ Errore lettura cartella Dropbox: {ex_dbx}")
+            else:
+                st.warning("Nessun percorso Dropbox inserito per questa ditta.")
+
+    # ELABORAZIONE FILE CARICATO A MANO
     if file_caricato is not None and ha_permesso_modifica:
         if not api_key_inserita:
-            st.error("🚨 Inserisci la tua chiave API Groq (gsk_...) a sinistra per elaborare il documento!")
+            st.error("🚨 Inserisci la tua chiave API Groq a sinistra!")
         else:
-            with st.spinner("🧠 Groq AI sta analizzando il documento..."):
-                try:
-                    fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
-                    data_oggi = datetime.now(fuso_orario).strftime("%d/%m/%Y")
-                    
-                    file_bytes = file_caricato.read()
-                    nome_file = file_caricato.name.lower()
-                    client = Groq(api_key=api_key_inserita)
-                    
-                    testo_estratto = ""
-                    
-                    if nome_file.endswith(".pdf"):
-                        pdf = pdfium.PdfDocument(file_bytes)
-                        for page in pdf:
-                            textpage = page.get_textpage()
-                            testo_estratto += textpage.get_text_range() + "\n"
-                    elif nome_file.endswith(".docx"):
-                        testo_estratto = docx2txt.process(io.BytesIO(file_bytes))
+            with st.spinner("🧠 Elaborazione file / archivio ZIP in corso..."):
+                client = Groq(api_key=api_key_inserita)
+                f_bytes = file_caricato.read()
+                esito = elabora_singolo_documento_con_ai(f_bytes, file_caricato.name, client, azienda_selezionata)
+                st.session_state["uploader_key"] += 1
+                st.success(f"🎉 Risultato: {esito}")
+                st.rerun()
 
-                    testo_estratto = testo_estratto.strip()
-
-                    if not testo_estratto:
-                        st.error("📄 Il PDF caricato non contiene testo selezionabile. Salvalo come PDF stampabile/con testo.")
-                    else:
-                        testo_ottimizzato = testo_estratto[:3500]
-
-                        prompt = f"""
-                        Sei un esperto CSE di sicurezza sul lavoro. Analizza questo documento.
-                        LA DATA ODIERNA DI RIFERIMENTO È TASSATIVAMENTE: {data_oggi}.
-
-                        ISTRUZIONI RIGIDE PER L'ANALISI:
-                        1. NOME LAVORATORE:
-                           - Estrai SOLO ED ESCLUSIVAMENTE il Nome e Cognome della persona (es. "MAHMOUD ALI EZZAT ALI").
-                           - NON INCLUDERE MAI il nome del corso o parentesi nel campo del lavoratore.
-                        
-                        2. DATA DI SCADENZA:
-                           - Distingui la data di SVOLGIMENTO del corso dalla DATA DI SCADENZA.
-                           - Se è un ATTESTATO DI FORMAZIONE (es. Ambienti Confinati, Antincendio, Primo Soccorso, Quota, ecc.) e non c'è scritta la scadenza, CALCOLA la scadenza aggiungendo 5 ANNI alla data del corso (es. corso del 11/05/2026 -> scadenza 11/05/2031).
-                           - Se è una VISITA MEDICA e c'è scritto "scadenza Maggio 2028", usa "31/05/2028".
-
-                        3. STATO RISPETTO A OGGI ({data_oggi}):
-                           - Se la data di scadenza è FUTURA (oltre 60 giorni da {data_oggi}): rispondi "In Regola"
-                           - Se scade nei prossimi 60 giorni rispetto a {data_oggi}: rispondi "In Scadenza"
-                           - Se la data di scadenza è PASSATA rispetto a {data_oggi}: rispondi "Scaduto"
-
-                        4. PRESCRIZIONI MEDICHE:
-                           - Rileva prescrizioni SOLO per Idoneità Sanitaria/Visita Medica.
-                           - Per gli attestati di formazione rispondi sempre "Nessuna prescrizione rilevata".
-
-                        Rispondi ESCLUSIVAMENTE in JSON (USA SOLO TESTO SEMPLICE, SENZA EMOJI):
-                        {{
-                            "lavoratore": "NOME COGNOME",
-                            "mansione": "MANSIONE (se assente usa 'Operaio')",
-                            "documento_nome": "Nome esatto del corso/documento (es. Formazione Ambienti Confinati)",
-                            "data_scadenza": "DD/MM/AAAA",
-                            "stato_calcolato": "In Regola / In Scadenza / Scaduto",
-                            "prescrizione_medica": "Nessuna prescrizione rilevata"
-                        }}
-
-                        TESTO DOCUMENTO:
-                        {testo_ottimizzato}
-                        """
-
-                        try:
-                            chat_completion = client.chat.completions.create(
-                                messages=[{"role": "user", "content": prompt}],
-                                model="llama-3.3-70b-versatile",
-                                response_format={"type": "json_object"}
-                            )
-                        except Exception as req_err:
-                            if "429" in str(req_err) or "rate_limit" in str(req_err):
-                                chat_completion = client.chat.completions.create(
-                                    messages=[{"role": "user", "content": prompt}],
-                                    model="llama-3.1-8b-instant",
-                                    response_format={"type": "json_object"}
-                                )
-                            else:
-                                raise req_err
-                        
-                        risposta_testo = chat_completion.choices[0].message.content
-                        dati_ai = json.loads(risposta_testo)
-                        
-                        nom_lav = pulisci_nome_rigido(dati_ai.get("lavoratore"))
-                        mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
-                        
-                        # Normalizzazione forzata del nome documento
-                        doc_grezzo = (dati_ai.get("documento_nome") or "Attestato Formazione").strip()
-                        doc_nome = normalizza_nome_documento(doc_grezzo)
-                        
-                        data_scad = (dati_ai.get("data_scadenza") or "Illimitato").strip()
-                        
-                        stato_raw = str(dati_ai.get("stato_calcolato", "")).lower()
-                        if "scaduto" in stato_raw:
-                            stato_calc = "🔴 Scaduto"
-                        elif "scadenza" in stato_raw:
-                            stato_calc = "🟡 In Scadenza"
-                        else:
-                            stato_calc = "🟢 In Regola"
-
-                        prescr_raw = dati_ai.get("prescrizione_medica")
-                        prescr = prescr_raw.strip() if (prescr_raw and str(prescr_raw).lower() != "null") else 'Nessuna prescrizione rilevata'
-                        
-                        cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
-                        az_row = cursor.fetchone()
-                        if az_row:
-                            az_id = az_row[0]
-                            
-                            cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND UPPER(nominativo) = ?", (az_id, nom_lav))
-                            operaio_db = cursor.fetchone()
-                            
-                            if operaio_db:
-                                op_id = operaio_db[0]
-                                if prescr != 'Nessuna prescrizione rilevata':
-                                    cursor.execute("UPDATE lavoratori SET prescrizioni_mediche = ? WHERE id = ?", (prescr, op_id))
-                            else:
-                                cursor.execute("INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche) VALUES (?, ?, ?, '🔴 Da Verificare', ?)", (az_id, nom_lav, mans_lav, prescr))
-                                conn.commit()
-                                op_id = cursor.lastrowid
-                            
-                            # SALVATAGGIO CON RETRY IN CASO DI CONFLITTO
-                            cursor.execute("DELETE FROM documenti_lavoratori WHERE lavoratore_id = ? AND tipo_documento = ?", (op_id, doc_nome))
-                            cursor.execute("""
-                                INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
-                                VALUES (?, ?, ?, ?)
-                            """, (op_id, doc_nome, stato_calc, data_scad))
-                            
-                            cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
-                            tutti_stati = [r[0] for r in cursor.fetchall()]
-                            stringa_totale = "".join(tutti_stati)
-                            
-                            if "🔴" in stringa_totale:
-                                nuovo_accesso = "🔴 INTERDETTO"
-                            elif "🟡" in stringa_totale:
-                                nuovo_accesso = "🟡 MONITORARE"
-                            else:
-                                nuovo_accesso = "🟢 ABILITATO"
-                            
-                            cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, op_id))
-                            conn.commit()
-                            upload_db_to_dropbox()
-                            
-                            st.session_state["uploader_key"] += 1
-                            st.success(f"🎉 Registrato con successo: **{doc_nome}** per **{nom_lav}**")
-                            st.rerun()
-                    
-                except Exception as e:
-                    st.error(f"⚠️ Errore durante l'elaborazione AI: {str(e)}")
-
-    # --- REPERIMENTO E VISUALIZZAZIONE DATI ---
+    # --- TABELLA E STATISTICHE ---
     cursor.execute("""
         SELECT id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche FROM lavoratori 
         WHERE azienda_id = (SELECT id FROM aziende WHERE nome = ?)
@@ -360,14 +432,13 @@ if azienda_selezionata:
         with col1:
             st.markdown(f'<div class="metric-card"><h3>👥 Forza Lavoro Totale</h3><h2>{tot_lav}</h2></div>', unsafe_allow_html=True)
         with col2:
-            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #4caf50;"><h3>🟢 Abilitati all\'Ingresso</h3><h2>{abilitati}</h2></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #4caf50;"><h3>🟢 Abilitati</h3><h2>{abilitati}</h2></div>', unsafe_allow_html=True)
         with col3:
             st.markdown(f'<div class="metric-card" style="border-top: 4px solid #ff9800;"><h3>🟡 Da Monitorare</h3><h2>{monitorare}</h2></div>', unsafe_allow_html=True)
         with col4:
-            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #f44336;"><h3>🔴 Interdetti (Bloccati)</h3><h2>{interdetti}</h2></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="metric-card" style="border-top: 4px solid #f44336;"><h3>🔴 Interdetti</h3><h2>{interdetti}</h2></div>', unsafe_allow_html=True)
         
         st.write("---")
-        
         st.markdown("### 📋 Fascicolo Elettronico dei Dipendenti")
         for lav in lavoratori:
             lav_id, nome, mansione, accesso, prescrizioni = lav
@@ -378,17 +449,12 @@ if azienda_selezionata:
             tabella_pulita = []
             for doc_nome, validita, data_scad in docs:
                 if not data_scad or data_scad == "None":
-                    match = re.search(r'Scad\.\s*([\w/]+)', validita)
-                    if match:
-                        data_scad = match.group(1)
-                    else:
-                        data_scad = "Non richiesta / Illimitata"
-                
+                    data_scad = "Non richiesta / Illimitata"
                 tabella_pulita.append([doc_nome, validita, data_scad])
             
             with st.expander(f"{accesso} — 👤 {nome} ({mansione})"):
                 if prescrizioni and prescrizioni != 'Nessuna prescrizione rilevata':
-                    st.markdown(f'<div class="prescrizione-box">⚠️ **Prescrizioni Sanitarie / Limitazioni:** {prescrizioni}</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="prescrizione-box">⚠️ **Prescrizioni Sanitarie:** {prescrizioni}</div>', unsafe_allow_html=True)
                 
                 if tabella_pulita:
                     df = pd.DataFrame(tabella_pulita, columns=["Documento Caricato", "Validità AI", "Scadenza Calcolata"])
@@ -404,26 +470,19 @@ if azienda_selezionata:
                         upload_db_to_dropbox()
                         st.rerun()
 
-        # SUPER PULIZIA RIGIDA DUPLICATI
         if ha_permesso_modifica:
             st.write("---")
             if st.button("🧹 PULISCILA ORA (ELIMINA RIGHE DUPLICATE VECCHIE)"):
-                # Legge tutti i documenti esistenti
                 cursor.execute("SELECT id, lavoratore_id, tipo_documento, stato_scadenza, data_scadenza FROM documenti_lavoratori")
                 tutti_i_docs = cursor.fetchall()
-                
-                # Svuota temporaneamente la tabella per ricostruirla pulita
                 cursor.execute("DELETE FROM documenti_lavoratori")
                 
                 mantenuti = {}
                 for d_id, lav_id, t_doc, st_scad, d_scad in tutti_i_docs:
-                    # Normalizza il nome del documento
                     doc_norm = normalizza_nome_documento(t_doc)
                     chiave = (lav_id, doc_norm)
-                    # Sovrascrive mantenendo l'ultimo inserito per quello specifico lavoratore
                     mantenuti[chiave] = (st_scad, d_scad)
                 
-                # Re-inserisce solo 1 voce unica per tipo di corso per ciascun lavoratore
                 for (lav_id, doc_norm), (st_scad, d_scad) in mantenuti.items():
                     cursor.execute("""
                         INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
@@ -432,10 +491,9 @@ if azienda_selezionata:
                 
                 conn.commit()
                 upload_db_to_dropbox()
-                st.success("✨ Tabella totalmente azzerata dai duplicati e unificata!")
+                st.success("✨ Tabella pulita con successo!")
                 st.rerun()
-
     else:
-        st.info("Nessun lavoratore registrato per questa azienda. Passa al ruolo 'Coordinatore' per aggiungere file o aziende.")
+        st.info("Nessun lavoratore registrato per questa azienda.")
 else:
-    st.info("👋 Benvenuto! Aggiungi o seleziona un'azienda dalla barra laterale a sinistra per iniziare.")
+    st.info("👋 Seleziona o aggiungi un'azienda dalla barra laterale.")
