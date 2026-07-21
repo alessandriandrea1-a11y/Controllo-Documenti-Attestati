@@ -37,33 +37,49 @@ def upload_db_to_dropbox():
         except Exception as e:
             st.error(f"⚠️ Errore nel salvataggio su Dropbox: {e}")
 
+# Scarica da Dropbox all'avvio
 download_db_from_dropbox()
 
-# --- DATABASE LOCAL SQLITE ---
+# --- DATABASE LOCAL SQLITE E CREAZIONE TABELLE GARANTITA ---
 conn = sqlite3.connect(DB_FILE_NAME, check_same_thread=False)
 cursor = conn.cursor()
 
-cursor.execute("CREATE TABLE IF NOT EXISTS aziende (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT UNIQUE)")
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS lavoratori (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, azienda_id INTEGER,
-    nominativo TEXT, mansione TEXT, stato_scadenza_totale TEXT,
-    prescrizioni_mediche TEXT DEFAULT 'Nessuna prescrizione rilevata',
-    FOREIGN KEY(azienda_id) REFERENCES aziende(id),
-    UNIQUE(azienda_id, nominativo)
-)
-""")
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS documenti_lavoratori (
-    id INTEGER PRIMARY KEY AUTOINCREMENT, lavoratore_id INTEGER,
-    tipo_documento TEXT, stato_scadenza TEXT, data_scadenza TEXT,
-    FOREIGN KEY(lavoratore_id) REFERENCES lavoratori(id),
-    UNIQUE(lavoratore_id, tipo_documento)
-)
-""")
-conn.commit()
+def inizializza_db():
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS aziende (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        nome TEXT UNIQUE
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS lavoratori (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        azienda_id INTEGER,
+        nominativo TEXT, 
+        mansione TEXT, 
+        stato_scadenza_totale TEXT,
+        prescrizioni_mediche TEXT DEFAULT 'Nessuna prescrizione rilevata',
+        FOREIGN KEY(azienda_id) REFERENCES aziende(id),
+        UNIQUE(azienda_id, nominativo)
+    )
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS documenti_lavoratori (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, 
+        lavoratore_id INTEGER,
+        tipo_documento TEXT, 
+        stato_scadenza TEXT, 
+        data_scadenza TEXT,
+        FOREIGN KEY(lavoratore_id) REFERENCES lavoratori(id),
+        UNIQUE(lavoratore_id, tipo_documento)
+    )
+    """)
+    conn.commit()
 
-# Aggiornamento colonne silente
+# Esegue l'inizializzazione tassativa delle tabelle
+inizializza_db()
+
+# Aggiornamento colonne silente se il DB esisteva già vecchio
 try:
     cursor.execute("PRAGMA table_info(documenti_lavoratori)")
     colonne_doc = [c[1] for c in cursor.fetchall()]
@@ -153,7 +169,6 @@ if azienda_selezionata:
         else:
             with st.spinner("🧠 Groq AI sta analizzando il documento..."):
                 try:
-                    # Calcolo dinamico della data di OGGI con fuso orario italiano
                     fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
                     data_oggi = datetime.now(fuso_orario).strftime("%d/%m/%Y")
                     
@@ -347,3 +362,5 @@ if azienda_selezionata:
                         st.rerun()
     else:
         st.info("Nessun lavoratore registrato per questa azienda. Passa al ruolo 'Coordinatore' per aggiungere file o aziende.")
+else:
+    st.info("👋 Benvenuto! Aggiungi o seleziona un'azienda dalla barra laterale a sinistra per iniziare.")
