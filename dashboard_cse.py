@@ -2,13 +2,13 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import json
-from google import genai
-from google.genai import types
 import io
 import dropbox
 import docx2txt
 import re
 from datetime import datetime
+import base64
+from groq import Groq
 
 st.set_page_config(layout="wide", page_title="Dashboard CSE — Controllo Totale Diretto")
 
@@ -86,15 +86,14 @@ PASSWORD_CORRETTA = "Criansa2026"
 
 # --- BARRA LATERALE ---
 with st.sidebar:
-    st.markdown("### 🧠 CONFIGURAZIONE AI")
-    api_key_manuale = st.text_input("Inserisci l'API Key di Google Gemini:", type="password")
-    api_key_segreta = st.secrets.get("GEMINI_API_KEY", "")
+    st.markdown("### 🧠 CONFIGURAZIONE GROQ AI")
+    api_key_manuale = st.text_input("Inserisci l'API Key di Groq (gsk_...):", type="password")
+    api_key_segreta = st.secrets.get("GROQ_API_KEY", "")
     
-    # Priorità assoluta alla chiave inserita a mano dall'utente
     if api_key_manuale.strip() != "":
         api_key_inserita = api_key_manuale.strip()
-        st.success("🔑 Usando l'API Key inserita a mano!")
-    elif api_key_segreta and api_key_segreta != "da_inserire_su_chrome":
+        st.success("🔑 Usando l'API Key Groq inserita a mano!")
+    elif api_key_segreta:
         api_key_inserita = api_key_segreta
         st.info("🤖 Usando l'API Key dai Secrets.")
     else:
@@ -136,7 +135,7 @@ with st.sidebar:
                     
         st.write("---")
         st.markdown("### 📤 LETTORE AUTOMATICO MULTIMODALE")
-        file_caricato = st.file_uploader("Carica Documento (PDF, PNG, JPG, DOCX)", type=["pdf", "png", "jpg", "jpeg", "docx"])
+        file_caricato = st.file_uploader("Carica Documento (PNG, JPG, DOCX)", type=["png", "jpg", "jpeg", "docx"])
     else:
         file_caricato = None
 
@@ -148,24 +147,13 @@ if azienda_selezionata:
     
     if file_caricato is not None and ha_permesso_modifica:
         if not api_key_inserita:
-            st.error("🚨 Inserisci la tua chiave API Gemini a sinistra per elaborare il documento!")
+            st.error("🚨 Inserisci la tua chiave API Groq (gsk_...) a sinistra per elaborare il documento!")
         else:
-            with st.spinner("🧠 L'AI sta analizzando la grafica e i testi del documento..."):
+            with st.spinner("🧠 Groq AI sta analizzando il documento a velocità massima..."):
                 try:
                     file_bytes = file_caricato.read()
                     nome_file = file_caricato.name.lower()
-                    contenuto_gemini = []
-                    
-                    if nome_file.endswith(".pdf"):
-                        contenuto_gemini.append(types.Part.from_bytes(data=file_bytes, mime_type="application/pdf"))
-                    elif nome_file.endswith((".png", ".jpg", ".jpeg")):
-                        mime = "image/png" if nome_file.endswith(".png") else "image/jpeg"
-                        contenuto_gemini.append(types.Part.from_bytes(data=file_bytes, mime_type=mime))
-                    elif nome_file.endswith(".docx"):
-                        testo_word = docx2txt.process(io.BytesIO(file_bytes))
-                        contenuto_gemini.append(testo_word)
-                    
-                    client = genai.Client(api_key=api_key_inserita)
+                    client = Groq(api_key=api_key_inserita)
                     data_oggi = datetime.now().strftime("%d/%m/%Y")
                     
                     prompt = f"""
@@ -183,7 +171,7 @@ if azienda_selezionata:
                     4. Calcola lo stato rispetto al {data_oggi}: "🟢 In Regola", "🟡 In Scadenza", "🔴 Scaduto".
                     5. PRESCRIZIONI MEDICHE: Se presenti estraile dettagliatamente. Se non ce ne sono, restituisci null.
 
-                    Rispondi RIGOROSAMENTE in formato JSON con questa struttura:
+                    Rispondi ESCLUSIVAMENTE con un oggetto JSON valido (senza markdown o altro testo):
                     {{
                         "lavoratore": "NOME COGNOME",
                         "mansione": "MANSIONE",
@@ -193,55 +181,75 @@ if azienda_selezionata:
                         "prescrizione_medica": "Testo dettagliato delle prescrizioni/limitazioni estratte o null"
                     }}
                     """
-                    contenuto_gemini.append(prompt)
-                    
-                    response = client.models.generate_content(
-                        model='gemini-2.0-flash',
-                        contents=contenuto_gemini,
-                        config=types.GenerateContentConfig(response_mime_type="application/json")
+
+                    if nome_file.endswith((".png", ".jpg", ".jpeg")):
+                        base64_image = base64.b64encode(file_bytes).decode('utf-8')
+                        mime = "image/png" if nome_file.endswith(".png") else "image/jpeg"
+                        messages = [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64_image}"}}
+                                ]
+                            }
+                        ]
+                        model_to_use = "llama-3.2-11b-vision-preview"
+                    elif nome_file.endswith(".docx"):
+                        testo_word = docx2txt.process(io.BytesIO(file_bytes))
+                        messages = [{"role": "user", "content": f"{prompt}\n\nContenuto del documento:\n{testo_word}"}]
+                        model_to_use = "llama-3.3-70b-versatile"
+                    else:
+                        st.error("Per immagini/scansioni usa JPG o PNG, oppure carica documenti Word (.docx).")
+                        st.stop()
+
+                    chat_completion = client.chat.completions.create(
+                        messages=messages,
+                        model=model_to_use,
+                        response_format={"type": "json_object"}
                     )
                     
-                    if response.text:
-                        dati_ai = json.loads(response.text.strip())
-                        
-                        cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
-                        az_id = cursor.fetchone()[0]
-                        
-                        cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND LOWER(nominativo) = LOWER(?)", (az_id, dati_ai["lavoratore"].strip()))
-                        operaio_db = cursor.fetchone()
-                        
-                        prescr = dati_ai["prescrizione_medica"] if dati_ai["prescrizione_medica"] else 'Nessuna prescrizione rilevata'
-                        
-                        if operaio_db:
-                            op_id = operaio_db[0]
-                            if dati_ai["prescrizione_medica"]:
-                                cursor.execute("UPDATE lavoratori SET prescrizioni_mediche = ? WHERE id = ?", (prescr, op_id))
-                        else:
-                            cursor.execute("INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche) VALUES (?, ?, ?, '🔴 Da Verificare', ?)", (az_id, dati_ai["lavoratore"].strip(), dati_ai["mansione"], prescr))
-                            conn.commit()
-                            op_id = cursor.lastrowid
-                        
-                        stato_pulito = dati_ai["stato_calcolato"].split("(")[0].strip()
-                        
-                        cursor.execute("""
-                            INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
-                            VALUES (?, ?, ?, ?)
-                            ON CONFLICT(lavoratore_id, tipo_documento) 
-                            DO UPDATE SET stato_scadenza=excluded.stato_scadenza, data_scadenza=excluded.data_scadenza
-                        """, (op_id, dati_ai["documento_nome"], stato_pulito, dati_ai["data_scadenza"]))
-                        
-                        cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
-                        tutti_stati = [r[0] for r in cursor.fetchall()]
-                        stringa_totale = "".join(tutti_stati)
-                        nuovo_accesso = "🔴 INTERDETTO" if "🔴" in stringa_totale else ("🟡 MONITORARE" if "🟡" in stringa_totale else "🟢 ABILITATO")
-                        
-                        cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, op_id))
+                    risposta_testo = chat_completion.choices[0].message.content
+                    dati_ai = json.loads(risposta_testo)
+                    
+                    cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
+                    az_id = cursor.fetchone()[0]
+                    
+                    cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND LOWER(nominativo) = LOWER(?)", (az_id, dati_ai["lavoratore"].strip()))
+                    operaio_db = cursor.fetchone()
+                    
+                    prescr = dati_ai["prescrizione_medica"] if dati_ai["prescrizione_medica"] else 'Nessuna prescrizione rilevata'
+                    
+                    if operaio_db:
+                        op_id = operaio_db[0]
+                        if dati_ai["prescrizione_medica"]:
+                            cursor.execute("UPDATE lavoratori SET prescrizioni_mediche = ? WHERE id = ?", (prescr, op_id))
+                    else:
+                        cursor.execute("INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche) VALUES (?, ?, ?, '🔴 Da Verificare', ?)", (az_id, dati_ai["lavoratore"].strip(), dati_ai["mansione"], prescr))
                         conn.commit()
-                        
-                        upload_db_to_dropbox()
-                        st.success(f"🎉 Registrato/Aggiornato: {dati_ai['documento_nome']} per {dati_ai['lavoratore']}")
-                        st.rerun()
-                        
+                        op_id = cursor.lastrowid
+                    
+                    stato_pulito = dati_ai["stato_calcolato"].split("(")[0].strip()
+                    
+                    cursor.execute("""
+                        INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(lavoratore_id, tipo_documento) 
+                        DO UPDATE SET stato_scadenza=excluded.stato_scadenza, data_scadenza=excluded.data_scadenza
+                    """, (op_id, dati_ai["documento_nome"], stato_pulito, dati_ai["data_scadenza"]))
+                    
+                    cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
+                    tutti_stati = [r[0] for r in cursor.fetchall()]
+                    stringa_totale = "".join(tutti_stati)
+                    nuovo_accesso = "🔴 INTERDETTO" if "🔴" in stringa_totale else ("🟡 MONITORARE" if "🟡" in stringa_totale else "🟢 ABILITATO")
+                    
+                    cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, op_id))
+                    conn.commit()
+                    
+                    upload_db_to_dropbox()
+                    st.success(f"🎉 Registrato/Aggiornato con Groq: {dati_ai['documento_nome']} per {dati_ai['lavoratore']}")
+                    st.rerun()
+                    
                 except Exception as e:
                     st.error(f"Errore durante l'elaborazione AI: {str(e)}")
 
