@@ -3,3 +3,6 @@ pandas
 dropbox
 docx2txt
 groq
+pypdf
+pdf2image
+pypdfium2
