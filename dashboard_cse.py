@@ -62,6 +62,13 @@ def inizializza_db():
         percorso_dropbox TEXT DEFAULT ''
     )
     """)
+    # MIGRAZIONE AUTOMATICA: Aggiunge la colonna se il DB esisteva già senza di essa
+    try:
+        cursor.execute("ALTER TABLE aziende ADD COLUMN percorso_dropbox TEXT DEFAULT ''")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass # La colonna esiste già
+
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS lavoratori (
         id INTEGER PRIMARY KEY AUTOINCREMENT, 
@@ -361,7 +368,7 @@ if azienda_selezionata:
     # PERCORSO DROPBOX ASSOCIATO ALL'AZIENDA
     cursor.execute("SELECT percorso_dropbox FROM aziende WHERE nome = ?", (azienda_selezionata,))
     row_p = cursor.fetchone()
-    percorso_dropbox_ditta = row_p[0] if row_p else ""
+    percorso_dropbox_ditta = row_p[0] if (row_p and row_p[0]) else ""
 
     if ha_permesso_modifica:
         c_left, c_right = st.columns(2)
