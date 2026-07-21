@@ -99,6 +99,10 @@ st.markdown("""
 
 PASSWORD_CORRETTA = "Criansa2026"
 
+# Inizializza contatore chiave per l'uploader
+if "uploader_key" not in st.session_state:
+    st.session_state["uploader_key"] = 0
+
 # --- BARRA LATERALE ---
 with st.sidebar:
     st.markdown("### 🧠 CONFIGURAZIONE GROQ AI")
@@ -150,7 +154,7 @@ with st.sidebar:
                     
         st.write("---")
         st.markdown("### 📤 LETTORE AUTOMATICO MULTIMODALE")
-        file_caricato = st.file_uploader("Carica Documento (PDF, DOCX)", type=["pdf", "docx"])
+        file_caricato = st.file_uploader("Carica Documento (PDF, DOCX)", type=["pdf", "docx"], key=f"uploader_{st.session_state['uploader_key']}")
     else:
         file_caricato = None
 
@@ -251,7 +255,6 @@ if azienda_selezionata:
                         doc_nome = (dati_ai.get("documento_nome") or "Attestato Formazione").strip()
                         data_scad = (dati_ai.get("data_scadenza") or "Illimitato").strip()
                         
-                        # Aggiunta pallino colorato via Python per evitare errori JSON con Groq
                         stato_raw = str(dati_ai.get("stato_calcolato", "")).lower()
                         if "scaduto" in stato_raw:
                             stato_calc = "🔴 Scaduto"
@@ -268,7 +271,6 @@ if azienda_selezionata:
                         if az_row:
                             az_id = az_row[0]
                             
-                            # Cerca operaio nel DB
                             cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND UPPER(nominativo) = ?", (az_id, nom_lav))
                             operaio_db = cursor.fetchone()
                             
@@ -288,7 +290,6 @@ if azienda_selezionata:
                                 DO UPDATE SET stato_scadenza=excluded.stato_scadenza, data_scadenza=excluded.data_scadenza
                             """, (op_id, doc_nome, stato_calc, data_scad))
                             
-                            # Ricalcola stato totale
                             cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
                             tutti_stati = [r[0] for r in cursor.fetchall()]
                             stringa_totale = "".join(tutti_stati)
@@ -302,8 +303,10 @@ if azienda_selezionata:
                             
                             cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, op_id))
                             conn.commit()
-                            
                             upload_db_to_dropbox()
+                            
+                            # Incrementa contatore per resettare l'uploader e spezzare il loop
+                            st.session_state["uploader_key"] += 1
                             st.success(f"🎉 Registrato con successo: **{doc_nome}** per **{nom_lav}**")
                             st.rerun()
                     
