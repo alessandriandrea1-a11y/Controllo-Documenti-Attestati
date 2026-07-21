@@ -81,11 +81,8 @@ inizializza_db()
 def pulisci_nome_rigido(nome_grezzo):
     if not nome_grezzo:
         return "SCONOSCIUTO"
-    # Rimuove tutto ciò che è tra parentesi es. "(AMBIENTI CONFINATI...)"
     nome = re.sub(r'\(.*?\)', '', str(nome_grezzo))
-    # Rimuove trattini o simboli
     nome = re.sub(r'[-–—]', ' ', nome)
-    # Rimuove spazi doppi e converte in MAIUSCOLO
     nome_pulito = re.sub(r'\s+', ' ', nome).strip().upper()
     return nome_pulito if nome_pulito else "SCONOSCIUTO"
 
@@ -200,7 +197,7 @@ if azienda_selezionata:
                         ISTRUZIONI RIGIDE PER L'ANALISI:
                         1. NOME LAVORATORE:
                            - Estrai SOLO ED ESCLUSIVAMENTE il Nome e Cognome della persona (es. "MAHMOUD ALI EZZAT ALI").
-                           - NON INCLUDERE MAI il nome del corso o parentesi nel campo del lavoratore!
+                           - NON INCLUDERE MAI il nome del corso o parentesi nel campo del lavoratore.
                         
                         2. DATA DI SCADENZA:
                            - Distingui la data di SVOLGIMENTO del corso dalla DATA DI SCADENZA.
@@ -208,21 +205,21 @@ if azienda_selezionata:
                            - Se è una VISITA MEDICA e c'è scritto "scadenza Maggio 2028", usa "31/05/2028".
 
                         3. STATO RISPETTO A OGGI ({data_oggi}):
-                           - Se la data di scadenza è FUTURA (oltre 60 giorni da {data_oggi}): "🟢 In Regola"
-                           - Se scade nei prossimi 60 giorni rispetto a {data_oggi}: "🟡 In Scadenza"
-                           - Se la data di scadenza è PASSATA rispetto a {data_oggi}: "🔴 Scaduto"
+                           - Se la data di scadenza è FUTURA (oltre 60 giorni da {data_oggi}): rispondi "In Regola"
+                           - Se scade nei prossimi 60 giorni rispetto a {data_oggi}: rispondi "In Scadenza"
+                           - Se la data di scadenza è PASSATA rispetto a {data_oggi}: rispondi "Scaduto"
 
                         4. PRESCRIZIONI MEDICHE:
                            - Rileva prescrizioni SOLO per Idoneità Sanitaria/Visita Medica.
                            - Per gli attestati di formazione rispondi sempre "Nessuna prescrizione rilevata".
 
-                        Rispondi ESCLUSIVAMENTE in JSON:
+                        Rispondi ESCLUSIVAMENTE in JSON (USA SOLO TESTO SEMPLICE, SENZA EMOJI):
                         {{
                             "lavoratore": "NOME COGNOME",
                             "mansione": "MANSIONE (se assente usa 'Operaio')",
                             "documento_nome": "Nome esatto del corso/documento (es. Formazione Ambienti Confinati)",
                             "data_scadenza": "DD/MM/AAAA",
-                            "stato_calcolato": "🟢 In Regola / 🟡 In Scadenza / 🔴 Scaduto",
+                            "stato_calcolato": "In Regola / In Scadenza / Scaduto",
                             "prescrizione_medica": "Nessuna prescrizione rilevata"
                         }}
 
@@ -253,7 +250,16 @@ if azienda_selezionata:
                         mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
                         doc_nome = (dati_ai.get("documento_nome") or "Attestato Formazione").strip()
                         data_scad = (dati_ai.get("data_scadenza") or "Illimitato").strip()
-                        stato_calc = (dati_ai.get("stato_calcolato") or "🟢 In Regola").strip()
+                        
+                        # Aggiunta pallino colorato via Python per evitare errori JSON con Groq
+                        stato_raw = str(dati_ai.get("stato_calcolato", "")).lower()
+                        if "scaduto" in stato_raw:
+                            stato_calc = "🔴 Scaduto"
+                        elif "scadenza" in stato_raw:
+                            stato_calc = "🟡 In Scadenza"
+                        else:
+                            stato_calc = "🟢 In Regola"
+
                         prescr_raw = dati_ai.get("prescrizione_medica")
                         prescr = prescr_raw.strip() if (prescr_raw and str(prescr_raw).lower() != "null") else 'Nessuna prescrizione rilevata'
                         
@@ -275,14 +281,12 @@ if azienda_selezionata:
                                 conn.commit()
                                 op_id = cursor.lastrowid
                             
-                            stato_pulito = stato_calc.split("(")[0].strip()
-                            
                             cursor.execute("""
                                 INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
                                 VALUES (?, ?, ?, ?)
                                 ON CONFLICT(lavoratore_id, tipo_documento) 
                                 DO UPDATE SET stato_scadenza=excluded.stato_scadenza, data_scadenza=excluded.data_scadenza
-                            """, (op_id, doc_nome, stato_pulito, data_scad))
+                            """, (op_id, doc_nome, stato_calc, data_scad))
                             
                             # Ricalcola stato totale
                             cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
@@ -348,8 +352,7 @@ if azienda_selezionata:
                     else:
                         data_scad = "Non richiesta / Illimitata"
                 
-                validita_pulita = validita.split("(")[0].strip()
-                tabella_pulita.append([doc_nome, validita_pulita, data_scad])
+                tabella_pulita.append([doc_nome, validita, data_scad])
             
             with st.expander(f"{accesso} — 👤 {nome} ({mansione})"):
                 if prescrizioni and prescrizioni != 'Nessuna prescrizione rilevata':
@@ -369,7 +372,7 @@ if azienda_selezionata:
                         upload_db_to_dropbox()
                         st.rerun()
 
-        # METODO AUTOMATICO PER SISTEMARE L'ERRORE ATTUALE
+        # PULIZIA DUPLICATI VECCHI CON UN CLICK
         if ha_permesso_modifica:
             st.write("---")
             if st.button("🧹 PULISCI E UNIFICA DUPLICATI ESISTENTI"):
@@ -380,7 +383,6 @@ if azienda_selezionata:
                     cursor.execute("UPDATE lavoratori SET nominativo = ? WHERE id = ?", (nom_p, l_id))
                 conn.commit()
                 
-                # Unifica eventuali duplicati con lo stesso nome pulito
                 cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
                 az_row = cursor.fetchone()
                 if az_row:
