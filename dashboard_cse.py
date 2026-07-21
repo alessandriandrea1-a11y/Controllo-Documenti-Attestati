@@ -201,7 +201,7 @@ if azienda_selezionata:
                                 ]
                             }
                         ]
-                        model_to_use = "llama-3.2-90b-vision-preview"
+                        model_to_use = "llama-3.2-11b-vision-instruct"
 
                     elif nome_file.endswith((".png", ".jpg", ".jpeg")):
                         base64_image = base64.b64encode(file_bytes).decode('utf-8')
@@ -215,7 +215,7 @@ if azienda_selezionata:
                                 ]
                             }
                         ]
-                        model_to_use = "llama-3.2-90b-vision-preview"
+                        model_to_use = "llama-3.2-11b-vision-instruct"
 
                     elif nome_file.endswith(".docx"):
                         testo_word = docx2txt.process(io.BytesIO(file_bytes))
