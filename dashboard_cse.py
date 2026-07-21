@@ -92,7 +92,7 @@ def normalizza_nome_documento(testo_doc):
     
     t = str(testo_doc).lower()
     
-    if "confinat" in t or "sospett" in t:
+    if "confinat" in t or "sospett" in t or "inquinament" in t:
         return "Formazione Ambienti Confinati"
     elif "antincendio" in t:
         return "Formazione Antincendio"
@@ -108,7 +108,7 @@ def normalizza_nome_documento(testo_doc):
         return "Formazione Preposto"
     elif "medica" in t or "idoneit" in t or "sanitar" in t:
         return "Idoneità Sanitaria"
-    elif "accordo stato regioni" in t or "generale" in t or "specifica" in t:
+    elif "accordo" in t or "generale" in t or "specifica" in t:
         return "Formazione Generale / Specifica"
     else:
         return testo_doc.strip().title()
@@ -279,7 +279,7 @@ if azienda_selezionata:
                         nom_lav = pulisci_nome_rigido(dati_ai.get("lavoratore"))
                         mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
                         
-                        # Normalizzazione rigida del nome documento per evitare duplicati
+                        # Normalizzazione forzata del nome documento
                         doc_grezzo = (dati_ai.get("documento_nome") or "Attestato Formazione").strip()
                         doc_nome = normalizza_nome_documento(doc_grezzo)
                         
@@ -313,11 +313,11 @@ if azienda_selezionata:
                                 conn.commit()
                                 op_id = cursor.lastrowid
                             
+                            # SALVATAGGIO CON RETRY IN CASO DI CONFLITTO
+                            cursor.execute("DELETE FROM documenti_lavoratori WHERE lavoratore_id = ? AND tipo_documento = ?", (op_id, doc_nome))
                             cursor.execute("""
                                 INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
                                 VALUES (?, ?, ?, ?)
-                                ON CONFLICT(lavoratore_id, tipo_documento) 
-                                DO UPDATE SET stato_scadenza=excluded.stato_scadenza, data_scadenza=excluded.data_scadenza
                             """, (op_id, doc_nome, stato_calc, data_scad))
                             
                             cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
@@ -404,53 +404,35 @@ if azienda_selezionata:
                         upload_db_to_dropbox()
                         st.rerun()
 
-        # PULIZIA DUPLICATI PERSONE E DOCUMENTI
+        # SUPER PULIZIA RIGIDA DUPLICATI
         if ha_permesso_modifica:
             st.write("---")
-            if st.button("🧹 PULISCI E UNIFICA TABELLE ED OPERAI DUPLICATI"):
-                # 1. Normalizza i nomi delle persone
-                cursor.execute("SELECT id, nominativo FROM lavoratori")
-                tutti = cursor.fetchall()
-                for l_id, nom in tutti:
-                    nom_p = pulisci_nome_rigido(nom)
-                    cursor.execute("UPDATE lavoratori SET nominativo = ? WHERE id = ?", (nom_p, l_id))
-                conn.commit()
+            if st.button("🧹 PULISCILA ORA (ELIMINA RIGHE DUPLICATE VECCHIE)"):
+                # Legge tutti i documenti esistenti
+                cursor.execute("SELECT id, lavoratore_id, tipo_documento, stato_scadenza, data_scadenza FROM documenti_lavoratori")
+                tutti_i_docs = cursor.fetchall()
                 
-                # 2. Unifica persone duplicate
-                cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
-                az_row = cursor.fetchone()
-                if az_row:
-                    az_id = az_row[0]
-                    cursor.execute("SELECT nominativo, COUNT(*) FROM lavoratori WHERE azienda_id = ? GROUP BY nominativo HAVING COUNT(*) > 1", (az_id,))
-                    duplicati = cursor.fetchall()
-                    for nom_dup, _ in duplicati:
-                        cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND nominativo = ? ORDER BY id ASC", (az_id, nom_dup))
-                        ids = [r[0] for r in cursor.fetchall()]
-                        id_principale = ids[0]
-                        for id_vecchio in ids[1:]:
-                            cursor.execute("UPDATE OR IGNORE documenti_lavoratori SET lavoratore_id = ? WHERE lavoratore_id = ?", (id_principale, id_vecchio))
-                            cursor.execute("DELETE FROM lavoratori WHERE id = ?", (id_vecchio))
-                    conn.commit()
-
-                # 3. Normalizza e unifica i titoli dei documenti duplicati
-                cursor.execute("SELECT id, tipo_documento FROM documenti_lavoratori")
-                docs_tutti = cursor.fetchall()
-                for d_id, d_nome in docs_tutti:
-                    d_norm = normalizza_nome_documento(d_nome)
-                    cursor.execute("UPDATE OR IGNORE documenti_lavoratori SET tipo_documento = ? WHERE id = ?", (d_norm, d_id))
+                # Svuota temporaneamente la tabella per ricostruirla pulita
+                cursor.execute("DELETE FROM documenti_lavoratori")
                 
-                # Rimuove righe duplicate createsi dopo la normalizzazione tenendo l'ultima inserita
-                cursor.execute("""
-                    DELETE FROM documenti_lavoratori 
-                    WHERE id NOT IN (
-                        SELECT MAX(id) 
-                        FROM documenti_lavoratori 
-                        GROUP BY lavoratore_id, tipo_documento
-                    )
-                """)
+                mantenuti = {}
+                for d_id, lav_id, t_doc, st_scad, d_scad in tutti_i_docs:
+                    # Normalizza il nome del documento
+                    doc_norm = normalizza_nome_documento(t_doc)
+                    chiave = (lav_id, doc_norm)
+                    # Sovrascrive mantenendo l'ultimo inserito per quello specifico lavoratore
+                    mantenuti[chiave] = (st_scad, d_scad)
+                
+                # Re-inserisce solo 1 voce unica per tipo di corso per ciascun lavoratore
+                for (lav_id, doc_norm), (st_scad, d_scad) in mantenuti.items():
+                    cursor.execute("""
+                        INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
+                        VALUES (?, ?, ?, ?)
+                    """, (lav_id, doc_norm, st_scad, d_scad))
+                
                 conn.commit()
                 upload_db_to_dropbox()
-                st.success("✨ Tutte le tabelle e le persone duplicate sono state unificate con successo!")
+                st.success("✨ Tabella totalmente azzerata dai duplicati e unificata!")
                 st.rerun()
 
     else:
