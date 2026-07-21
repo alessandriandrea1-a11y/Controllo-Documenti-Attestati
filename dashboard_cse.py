@@ -172,7 +172,6 @@ if azienda_selezionata:
                     if not testo_estratto:
                         st.error("📄 Il PDF caricato non contiene testo selezionabile (è una scansione/immagine). Salvalo come PDF con testo per farlo analizzare.")
                     else:
-                        # Troncamento intelligente per risparmiare token
                         testo_ottimizzato = testo_estratto[:3000]
 
                         prompt = f"""
@@ -183,21 +182,20 @@ if azienda_selezionata:
                         - Estrai eventuali prescrizioni/limitazioni mediche.
                         - Calcola lo stato: "🟢 In Regola", "🟡 In Scadenza", "🔴 Scaduto".
 
-                        Rispondi ESCLUSIVAMENTE con un oggetto JSON valido:
+                        Rispondi ESCLUSIVAMENTE con un oggetto JSON valido. Non usare valori null, rispondi con stringhe vuote "" se un dato non è presente:
                         {{
                             "lavoratore": "NOME COGNOME",
                             "mansione": "MANSIONE",
                             "documento_nome": "Nome Identificato del Documento",
                             "data_scadenza": "DD/MM/AAAA oppure 'Illimitato'",
                             "stato_calcolato": "🟢 In Regola / 🟡 In Scadenza / 🔴 Scaduto",
-                            "prescrizione_medica": "Testo prescrizioni oppure null"
+                            "prescrizione_medica": "Testo prescrizioni oppure 'Nessuna prescrizione rilevata'"
                         }}
 
                         TESTO:
                         {testo_ottimizzato}
                         """
 
-                        # Tentativo prioritario con modello principale, fallback automatico su 8b se va in rate-limit
                         try:
                             chat_completion = client.chat.completions.create(
                                 messages=[{"role": "user", "content": prompt}],
@@ -218,12 +216,14 @@ if azienda_selezionata:
                         risposta_testo = chat_completion.choices[0].message.content
                         dati_ai = json.loads(risposta_testo)
                         
-                        nom_lav = dati_ai.get("lavoratore", "Sconosciuto").strip()
-                        mans_lav = dati_ai.get("mansione", "Non specificata").strip()
-                        doc_nome = dati_ai.get("documento_nome", "Documento Generico").strip()
-                        data_scad = dati_ai.get("data_scadenza", "Illimitato").strip()
-                        stato_calc = dati_ai.get("stato_calcolato", "🟢 In Regola").strip()
-                        prescr = dati_ai.get("prescrizione_medica") if dati_ai.get("prescrizione_medica") else 'Nessuna prescrizione rilevata'
+                        # Estrazione protetta contro valori None/null
+                        nom_lav = (dati_ai.get("lavoratore") or "Sconosciuto").strip()
+                        mans_lav = (dati_ai.get("mansione") or "Non specificata").strip()
+                        doc_nome = (dati_ai.get("documento_nome") or "Documento Generico").strip()
+                        data_scad = (dati_ai.get("data_scadenza") or "Illimitato").strip()
+                        stato_calc = (dati_ai.get("stato_calcolato") or "🟢 In Regola").strip()
+                        prescr_raw = dati_ai.get("prescrizione_medica")
+                        prescr = prescr_raw.strip() if (prescr_raw and str(prescr_raw).lower() != "null") else 'Nessuna prescrizione rilevata'
                         
                         cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
                         az_row = cursor.fetchone()
