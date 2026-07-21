@@ -37,7 +37,6 @@ def upload_db_to_dropbox():
         except Exception as e:
             st.error(f"⚠️ Errore nel salvataggio su Dropbox: {e}")
 
-# Scarica da Dropbox all'avvio
 download_db_from_dropbox()
 
 # --- DATABASE LOCAL SQLITE E CREAZIONE TABELLE GARANTITA ---
@@ -76,18 +75,15 @@ def inizializza_db():
     """)
     conn.commit()
 
-# Esegue l'inizializzazione tassativa delle tabelle
 inizializza_db()
 
-# Aggiornamento colonne silente se il DB esisteva già vecchio
-try:
-    cursor.execute("PRAGMA table_info(documenti_lavoratori)")
-    colonne_doc = [c[1] for c in cursor.fetchall()]
-    if 'data_scadenza' not in colonne_doc:
-        cursor.execute("ALTER TABLE documenti_lavoratori ADD COLUMN data_scadenza TEXT")
-        conn.commit()
-except:
-    pass
+# Function di utilità per pulire e normalizzare i nomi
+def pulisci_nome(nome_grezzo):
+    if not nome_grezzo:
+        return "SCONOSCIUTO"
+    # Rimuove caratteri speciali inutili e spazi doppi, trasforma in MAIUSCOLO
+    nome_pulito = re.sub(r'\s+', ' ', str(nome_grezzo)).strip().upper()
+    return nome_pulito
 
 # Grafica CSS
 st.markdown("""
@@ -250,8 +246,8 @@ if azienda_selezionata:
                         risposta_testo = chat_completion.choices[0].message.content
                         dati_ai = json.loads(risposta_testo)
                         
-                        nom_lav = (dati_ai.get("lavoratore") or "Sconosciuto").strip()
-                        mans_lav = (dati_ai.get("mansione") or "Operaio").strip()
+                        nom_lav = pulisci_nome(dati_ai.get("lavoratore"))
+                        mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
                         doc_nome = (dati_ai.get("documento_nome") or "Attestato Formazione").strip()
                         data_scad = (dati_ai.get("data_scadenza") or "Illimitato").strip()
                         stato_calc = (dati_ai.get("stato_calcolato") or "🟢 In Regola").strip()
@@ -263,7 +259,8 @@ if azienda_selezionata:
                         if az_row:
                             az_id = az_row[0]
                             
-                            cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND LOWER(nominativo) = LOWER(?)", (az_id, nom_lav))
+                            # Cerca operaio ignorando la distinzione tra maiuscole/minuscole e spazi
+                            cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND UPPER(nominativo) = ?", (az_id, nom_lav))
                             operaio_db = cursor.fetchone()
                             
                             if operaio_db:
@@ -284,10 +281,17 @@ if azienda_selezionata:
                                 DO UPDATE SET stato_scadenza=excluded.stato_scadenza, data_scadenza=excluded.data_scadenza
                             """, (op_id, doc_nome, stato_pulito, data_scad))
                             
+                            # Calcola stato totale d'accesso per il lavoratore
                             cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
                             tutti_stati = [r[0] for r in cursor.fetchall()]
                             stringa_totale = "".join(tutti_stati)
-                            nuovo_accesso = "🔴 INTERDETTO" if "🔴" in stringa_totale else ("🟡 MONITORARE" if "🟡" in stringa_totale else "🟢 ABILITATO")
+                            
+                            if "🔴" in stringa_totale:
+                                nuovo_accesso = "🔴 INTERDETTO"
+                            elif "🟡" in stringa_totale:
+                                nuovo_accesso = "🟡 MONITORARE"
+                            else:
+                                nuovo_accesso = "🟢 ABILITATO"
                             
                             cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, op_id))
                             conn.commit()
@@ -303,6 +307,7 @@ if azienda_selezionata:
     cursor.execute("""
         SELECT id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche FROM lavoratori 
         WHERE azienda_id = (SELECT id FROM aziende WHERE nome = ?)
+        ORDER BY nominativo ASC
     """, (azienda_selezionata,))
     lavoratori = cursor.fetchall()
     
@@ -354,7 +359,7 @@ if azienda_selezionata:
                     st.info("Nessun documento associato a questo lavoratore.")
                 
                 if ha_permesso_modifica:
-                    if st.button(f"❌ Rimuovi {nome}", key=f"del_{lav_id}"):
+                    if st.button(f"❌ Rimuovi Lavoratore", key=f"del_{lav_id}"):
                         cursor.execute("DELETE FROM documenti_lavoratori WHERE lavoratore_id = ?", (lav_id,))
                         cursor.execute("DELETE FROM lavoratori WHERE id = ?", (lav_id,))
                         conn.commit()
