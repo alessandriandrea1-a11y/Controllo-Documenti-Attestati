@@ -77,7 +77,7 @@ def inizializza_db():
 
 inizializza_db()
 
-# --- FUNZIONE RIGIDA DI PULIZIA NOMI ---
+# --- UTILITIES PER PULIZIA E NORMALIZZAZIONE ---
 def pulisci_nome_rigido(nome_grezzo):
     if not nome_grezzo:
         return "SCONOSCIUTO"
@@ -85,6 +85,33 @@ def pulisci_nome_rigido(nome_grezzo):
     nome = re.sub(r'[-–—]', ' ', nome)
     nome_pulito = re.sub(r'\s+', ' ', nome).strip().upper()
     return nome_pulito if nome_pulito else "SCONOSCIUTO"
+
+def normalizza_nome_documento(testo_doc):
+    if not testo_doc:
+        return "Attestato Formazione Generico"
+    
+    t = str(testo_doc).lower()
+    
+    if "confinat" in t or "sospett" in t:
+        return "Formazione Ambienti Confinati"
+    elif "antincendio" in t:
+        return "Formazione Antincendio"
+    elif "primo soccorso" in t:
+        return "Formazione Primo Soccorso"
+    elif "quota" in t or "cadute" in t:
+        return "Formazione Lavori in Quota"
+    elif "rls" in t:
+        return "Formazione RLS"
+    elif "rspp" in t:
+        return "Formazione RSPP"
+    elif "preposto" in t:
+        return "Formazione Preposto"
+    elif "medica" in t or "idoneit" in t or "sanitar" in t:
+        return "Idoneità Sanitaria"
+    elif "accordo stato regioni" in t or "generale" in t or "specifica" in t:
+        return "Formazione Generale / Specifica"
+    else:
+        return testo_doc.strip().title()
 
 # Grafica CSS
 st.markdown("""
@@ -99,7 +126,6 @@ st.markdown("""
 
 PASSWORD_CORRETTA = "Criansa2026"
 
-# Inizializza contatore chiave per l'uploader
 if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = 0
 
@@ -252,7 +278,11 @@ if azienda_selezionata:
                         
                         nom_lav = pulisci_nome_rigido(dati_ai.get("lavoratore"))
                         mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
-                        doc_nome = (dati_ai.get("documento_nome") or "Attestato Formazione").strip()
+                        
+                        # Normalizzazione rigida del nome documento per evitare duplicati
+                        doc_grezzo = (dati_ai.get("documento_nome") or "Attestato Formazione").strip()
+                        doc_nome = normalizza_nome_documento(doc_grezzo)
+                        
                         data_scad = (dati_ai.get("data_scadenza") or "Illimitato").strip()
                         
                         stato_raw = str(dati_ai.get("stato_calcolato", "")).lower()
@@ -305,7 +335,6 @@ if azienda_selezionata:
                             conn.commit()
                             upload_db_to_dropbox()
                             
-                            # Incrementa contatore per resettare l'uploader e spezzare il loop
                             st.session_state["uploader_key"] += 1
                             st.success(f"🎉 Registrato con successo: **{doc_nome}** per **{nom_lav}**")
                             st.rerun()
@@ -375,10 +404,11 @@ if azienda_selezionata:
                         upload_db_to_dropbox()
                         st.rerun()
 
-        # PULIZIA DUPLICATI VECCHI CON UN CLICK
+        # PULIZIA DUPLICATI PERSONE E DOCUMENTI
         if ha_permesso_modifica:
             st.write("---")
-            if st.button("🧹 PULISCI E UNIFICA DUPLICATI ESISTENTI"):
+            if st.button("🧹 PULISCI E UNIFICA TABELLE ED OPERAI DUPLICATI"):
+                # 1. Normalizza i nomi delle persone
                 cursor.execute("SELECT id, nominativo FROM lavoratori")
                 tutti = cursor.fetchall()
                 for l_id, nom in tutti:
@@ -386,6 +416,7 @@ if azienda_selezionata:
                     cursor.execute("UPDATE lavoratori SET nominativo = ? WHERE id = ?", (nom_p, l_id))
                 conn.commit()
                 
+                # 2. Unifica persone duplicate
                 cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
                 az_row = cursor.fetchone()
                 if az_row:
@@ -400,9 +431,27 @@ if azienda_selezionata:
                             cursor.execute("UPDATE OR IGNORE documenti_lavoratori SET lavoratore_id = ? WHERE lavoratore_id = ?", (id_principale, id_vecchio))
                             cursor.execute("DELETE FROM lavoratori WHERE id = ?", (id_vecchio))
                     conn.commit()
-                    upload_db_to_dropbox()
-                    st.success("✨ Database ripulito e unificato con successo!")
-                    st.rerun()
+
+                # 3. Normalizza e unifica i titoli dei documenti duplicati
+                cursor.execute("SELECT id, tipo_documento FROM documenti_lavoratori")
+                docs_tutti = cursor.fetchall()
+                for d_id, d_nome in docs_tutti:
+                    d_norm = normalizza_nome_documento(d_nome)
+                    cursor.execute("UPDATE OR IGNORE documenti_lavoratori SET tipo_documento = ? WHERE id = ?", (d_norm, d_id))
+                
+                # Rimuove righe duplicate createsi dopo la normalizzazione tenendo l'ultima inserita
+                cursor.execute("""
+                    DELETE FROM documenti_lavoratori 
+                    WHERE id NOT IN (
+                        SELECT MAX(id) 
+                        FROM documenti_lavoratori 
+                        GROUP BY lavoratore_id, tipo_documento
+                    )
+                """)
+                conn.commit()
+                upload_db_to_dropbox()
+                st.success("✨ Tutte le tabelle e le persone duplicate sono state unificate con successo!")
+                st.rerun()
 
     else:
         st.info("Nessun lavoratore registrato per questa azienda. Passa al ruolo 'Coordinatore' per aggiungere file o aziende.")
