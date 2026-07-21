@@ -77,13 +77,17 @@ def inizializza_db():
 
 inizializza_db()
 
-# Function di utilità per pulire e normalizzare i nomi
-def pulisci_nome(nome_grezzo):
+# --- FUNZIONE RIGIDA DI PULIZIA NOMI ---
+def pulisci_nome_rigido(nome_grezzo):
     if not nome_grezzo:
         return "SCONOSCIUTO"
-    # Rimuove caratteri speciali inutili e spazi doppi, trasforma in MAIUSCOLO
-    nome_pulito = re.sub(r'\s+', ' ', str(nome_grezzo)).strip().upper()
-    return nome_pulito
+    # Rimuove tutto ciò che è tra parentesi es. "(AMBIENTI CONFINATI...)"
+    nome = re.sub(r'\(.*?\)', '', str(nome_grezzo))
+    # Rimuove trattini o simboli
+    nome = re.sub(r'[-–—]', ' ', nome)
+    # Rimuove spazi doppi e converte in MAIUSCOLO
+    nome_pulito = re.sub(r'\s+', ' ', nome).strip().upper()
+    return nome_pulito if nome_pulito else "SCONOSCIUTO"
 
 # Grafica CSS
 st.markdown("""
@@ -193,33 +197,33 @@ if azienda_selezionata:
                         Sei un esperto CSE di sicurezza sul lavoro. Analizza questo documento.
                         LA DATA ODIERNA DI RIFERIMENTO È TASSATIVAMENTE: {data_oggi}.
 
-                        ISTRUZIONI PRECISE:
-                        1. IDENTIFICAZIONE TIPOLOGIA:
-                           - Distingui se si tratta di "Attestato di Formazione" oppure "Idoneità Sanitaria/Visita Medica".
+                        ISTRUZIONI RIGIDE PER L'ANALISI:
+                        1. NOME LAVORATORE:
+                           - Estrai SOLO ED ESCLUSIVAMENTE il Nome e Cognome della persona (es. "MAHMOUD ALI EZZAT ALI").
+                           - NON INCLUDERE MAI il nome del corso o parentesi nel campo del lavoratore!
                         
                         2. DATA DI SCADENZA:
-                           - DISTINGUI la data di EROGAZIONE/SVOLGIMENTO del corso dalla DATA DI SCADENZA.
-                           - Se è un ATTESTATO DI FORMAZIONE (es. Ambienti Confinati, Antincendio, Primo Soccorso, Lavori in Quota, ecc.) e NON c'è scritta esplicitamente una data di scadenza, la data di scadenza SI CALCOLA aggiungendo 5 ANNI alla data del corso (es. corso effettuato il 11/05/2026 -> data di scadenza 11/05/2031).
-                           - Se è una VISITA MEDICA e trovi indicazioni del tipo "scadenza Maggio 2028", usa l'ultimo giorno di quel mese ("31/05/2028").
+                           - Distingui la data di SVOLGIMENTO del corso dalla DATA DI SCADENZA.
+                           - Se è un ATTESTATO DI FORMAZIONE (es. Ambienti Confinati, Antincendio, Primo Soccorso, Quota, ecc.) e non c'è scritta la scadenza, CALCOLA la scadenza aggiungendo 5 ANNI alla data del corso (es. corso del 11/05/2026 -> scadenza 11/05/2031).
+                           - Se è una VISITA MEDICA e c'è scritto "scadenza Maggio 2028", usa "31/05/2028".
 
                         3. STATO RISPETTO A OGGI ({data_oggi}):
-                           - Confronta la data di scadenza calcolata con la data odierna ({data_oggi}).
                            - Se la data di scadenza è FUTURA (oltre 60 giorni da {data_oggi}): "🟢 In Regola"
-                           - Se la data di scadenza è entro i prossimi 60 giorni rispetto a {data_oggi}: "🟡 In Scadenza"
-                           - Se la data di scadenza è PASSATA/PRECEDENTE a {data_oggi}: "🔴 Scaduto"
+                           - Se scade nei prossimi 60 giorni rispetto a {data_oggi}: "🟡 In Scadenza"
+                           - Se la data di scadenza è PASSATA rispetto a {data_oggi}: "🔴 Scaduto"
 
                         4. PRESCRIZIONI MEDICHE:
-                           - Rileva prescrizioni SOLO SE si tratta di Idoneità Sanitaria/Visita Medica.
-                           - Se è un corso di formazione/attestato, restituisci SEMPRE "Nessuna prescrizione rilevata".
+                           - Rileva prescrizioni SOLO per Idoneità Sanitaria/Visita Medica.
+                           - Per gli attestati di formazione rispondi sempre "Nessuna prescrizione rilevata".
 
-                        Rispondi ESCLUSIVAMENTE con un oggetto JSON valido:
+                        Rispondi ESCLUSIVAMENTE in JSON:
                         {{
                             "lavoratore": "NOME COGNOME",
-                            "mansione": "MANSIONE (se assente inserisci 'Operaio')",
-                            "documento_nome": "Titolo/Tipo esatto del documento (es. Attestato Ambienti Confinati)",
+                            "mansione": "MANSIONE (se assente usa 'Operaio')",
+                            "documento_nome": "Nome esatto del corso/documento (es. Formazione Ambienti Confinati)",
                             "data_scadenza": "DD/MM/AAAA",
                             "stato_calcolato": "🟢 In Regola / 🟡 In Scadenza / 🔴 Scaduto",
-                            "prescrizione_medica": "Testo prescrizioni sanitarie oppure 'Nessuna prescrizione rilevata'"
+                            "prescrizione_medica": "Nessuna prescrizione rilevata"
                         }}
 
                         TESTO DOCUMENTO:
@@ -234,7 +238,6 @@ if azienda_selezionata:
                             )
                         except Exception as req_err:
                             if "429" in str(req_err) or "rate_limit" in str(req_err):
-                                st.info("ℹ️ Limite giornaliero raggiunto sul modello 70B: utilizzo del modello veloce di riserva (Llama 3.1 8B)...")
                                 chat_completion = client.chat.completions.create(
                                     messages=[{"role": "user", "content": prompt}],
                                     model="llama-3.1-8b-instant",
@@ -246,7 +249,7 @@ if azienda_selezionata:
                         risposta_testo = chat_completion.choices[0].message.content
                         dati_ai = json.loads(risposta_testo)
                         
-                        nom_lav = pulisci_nome(dati_ai.get("lavoratore"))
+                        nom_lav = pulisci_nome_rigido(dati_ai.get("lavoratore"))
                         mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
                         doc_nome = (dati_ai.get("documento_nome") or "Attestato Formazione").strip()
                         data_scad = (dati_ai.get("data_scadenza") or "Illimitato").strip()
@@ -259,7 +262,7 @@ if azienda_selezionata:
                         if az_row:
                             az_id = az_row[0]
                             
-                            # Cerca operaio ignorando la distinzione tra maiuscole/minuscole e spazi
+                            # Cerca operaio nel DB
                             cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND UPPER(nominativo) = ?", (az_id, nom_lav))
                             operaio_db = cursor.fetchone()
                             
@@ -281,7 +284,7 @@ if azienda_selezionata:
                                 DO UPDATE SET stato_scadenza=excluded.stato_scadenza, data_scadenza=excluded.data_scadenza
                             """, (op_id, doc_nome, stato_pulito, data_scad))
                             
-                            # Calcola stato totale d'accesso per il lavoratore
+                            # Ricalcola stato totale
                             cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
                             tutti_stati = [r[0] for r in cursor.fetchall()]
                             stringa_totale = "".join(tutti_stati)
@@ -359,12 +362,43 @@ if azienda_selezionata:
                     st.info("Nessun documento associato a questo lavoratore.")
                 
                 if ha_permesso_modifica:
-                    if st.button(f"❌ Rimuovi Lavoratore", key=f"del_{lav_id}"):
+                    if st.button(f"❌ Rimuovi Questo Lavoratore", key=f"del_{lav_id}"):
                         cursor.execute("DELETE FROM documenti_lavoratori WHERE lavoratore_id = ?", (lav_id,))
                         cursor.execute("DELETE FROM lavoratori WHERE id = ?", (lav_id,))
                         conn.commit()
                         upload_db_to_dropbox()
                         st.rerun()
+
+        # METODO AUTOMATICO PER SISTEMARE L'ERRORE ATTUALE
+        if ha_permesso_modifica:
+            st.write("---")
+            if st.button("🧹 PULISCI E UNIFICA DUPLICATI ESISTENTI"):
+                cursor.execute("SELECT id, nominativo FROM lavoratori")
+                tutti = cursor.fetchall()
+                for l_id, nom in tutti:
+                    nom_p = pulisci_nome_rigido(nom)
+                    cursor.execute("UPDATE lavoratori SET nominativo = ? WHERE id = ?", (nom_p, l_id))
+                conn.commit()
+                
+                # Unifica eventuali duplicati con lo stesso nome pulito
+                cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
+                az_row = cursor.fetchone()
+                if az_row:
+                    az_id = az_row[0]
+                    cursor.execute("SELECT nominativo, COUNT(*) FROM lavoratori WHERE azienda_id = ? GROUP BY nominativo HAVING COUNT(*) > 1", (az_id,))
+                    duplicati = cursor.fetchall()
+                    for nom_dup, _ in duplicati:
+                        cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND nominativo = ? ORDER BY id ASC", (az_id, nom_dup))
+                        ids = [r[0] for r in cursor.fetchall()]
+                        id_principale = ids[0]
+                        for id_vecchio in ids[1:]:
+                            cursor.execute("UPDATE OR IGNORE documenti_lavoratori SET lavoratore_id = ? WHERE lavoratore_id = ?", (id_principale, id_vecchio))
+                            cursor.execute("DELETE FROM lavoratori WHERE id = ?", (id_vecchio))
+                    conn.commit()
+                    upload_db_to_dropbox()
+                    st.success("✨ Database ripulito e unificato con successo!")
+                    st.rerun()
+
     else:
         st.info("Nessun lavoratore registrato per questa azienda. Passa al ruolo 'Coordinatore' per aggiungere file o aziende.")
 else:
