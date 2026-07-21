@@ -8,6 +8,7 @@ import io
 import dropbox
 import docx2txt
 import re
+from datetime import datetime
 
 st.set_page_config(layout="wide", page_title="Dashboard CSE — Controllo Totale Diretto")
 
@@ -159,9 +160,10 @@ if azienda_selezionata:
                         contenuto_gemini.append(testo_word)
                     
                     client = genai.Client(api_key=api_key_inserita)
+                    data_oggi = datetime.now().strftime("%d/%m/%Y")
                     
-                    prompt = """
-                    Analizza questo documento di sicurezza sul lavoro o idoneità sanitaria. La data odierna di riferimento è il 13/07/2026.
+                    prompt = f"""
+                    Analizza questo documento di sicurezza sul lavoro o idoneità sanitaria. La data odierna di riferimento è il {data_oggi}.
                     
                     ISTRUZIONI SPECIALI DI LETTURA CRITICA:
                     - Fai massima attenzione alle scritte a mano o a penna, specialmente nelle sezioni dedicate a date, scadenze, limitazioni o prescrizioni.
@@ -172,23 +174,23 @@ if azienda_selezionata:
                     1. Trova Nome e Cognome del lavoratore e la mansione.
                     2. Identifica il tipo preciso di documento.
                     3. CALCOLA/ESTRAI LA DATA DI SCADENZA (anche se scritta a penna o desunta da mese/anno).
-                    4. Calcola lo stato rispetto al 13/07/2026: "🟢 In Regola", "🟡 In Scadenza", "🔴 Scaduto".
+                    4. Calcola lo stato rispetto al {data_oggi}: "🟢 In Regola", "🟡 In Scadenza", "🔴 Scaduto".
                     5. PRESCRIZIONI MEDICHE: Se presenti estraile dettagliatamente. Se non ce ne sono, restituisci null.
 
                     Rispondi RIGOROSAMENTE in formato JSON con questa struttura:
-                    {
+                    {{
                         "lavoratore": "NOME COGNOME",
                         "mansione": "MANSIONE",
                         "documento_nome": "Nome Identificato del Documento",
                         "data_scadenza": "DD/MM/AAAA oppure 'Illimitato'",
                         "stato_calcolato": "🟢 In Regola / 🟡 In Scadenza / 🔴 Scaduto",
                         "prescrizione_medica": "Testo dettagliato delle prescrizioni/limitazioni estratte o null"
-                    }
+                    }}
                     """
                     contenuto_gemini.append(prompt)
                     
                     response = client.models.generate_content(
-                        model='gemini-1.5-pro',
+                        model='gemini-2.5-flash',
                         contents=contenuto_gemini,
                         config=types.GenerateContentConfig(response_mime_type="application/json")
                     )
