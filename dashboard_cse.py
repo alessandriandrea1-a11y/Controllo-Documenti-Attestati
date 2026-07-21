@@ -87,12 +87,18 @@ PASSWORD_CORRETTA = "Criansa2026"
 # --- BARRA LATERALE ---
 with st.sidebar:
     st.markdown("### 🧠 CONFIGURAZIONE AI")
+    api_key_manuale = st.text_input("Inserisci l'API Key di Google Gemini:", type="password")
     api_key_segreta = st.secrets.get("GEMINI_API_KEY", "")
-    if api_key_segreta and api_key_segreta != "da_inserire_su_chrome":
+    
+    # Priorità assoluta alla chiave inserita a mano dall'utente
+    if api_key_manuale.strip() != "":
+        api_key_inserita = api_key_manuale.strip()
+        st.success("🔑 Usando l'API Key inserita a mano!")
+    elif api_key_segreta and api_key_segreta != "da_inserire_su_chrome":
         api_key_inserita = api_key_segreta
-        st.info("🤖 Chiave Gemini caricata dai Secrets.")
+        st.info("🤖 Usando l'API Key dai Secrets.")
     else:
-        api_key_inserita = st.text_input("Inserisci l'API Key di Google Gemini:", type="password")
+        api_key_inserita = ""
 
     st.write("---")
     st.markdown("### 🔐 ACCESSO UTENTE")
@@ -141,10 +147,10 @@ if azienda_selezionata:
     st.write("---")
     
     if file_caricato is not None and ha_permesso_modifica:
-        if not api_key_inserita or api_key_inserita == "da_inserire_su_chrome":
-            st.error("🚨 Inserisci la tua chiave API Gemini qui a sinistra per elaborare il documento!")
+        if not api_key_inserita:
+            st.error("🚨 Inserisci la tua chiave API Gemini a sinistra per elaborare il documento!")
         else:
-            with st.spinner("🧠 L'AI sta analizzando la grafica e i testi (anche a penna) del documento..."):
+            with st.spinner("🧠 L'AI sta analizzando la grafica e i testi del documento..."):
                 try:
                     file_bytes = file_caricato.read()
                     nome_file = file_caricato.name.lower()
@@ -190,7 +196,7 @@ if azienda_selezionata:
                     contenuto_gemini.append(prompt)
                     
                     response = client.models.generate_content(
-                        model='gemini-1.5-flash',
+                        model='gemini-2.5-flash',
                         contents=contenuto_gemini,
                         config=types.GenerateContentConfig(response_mime_type="application/json")
                     )
