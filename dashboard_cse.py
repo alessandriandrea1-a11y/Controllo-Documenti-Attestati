@@ -188,7 +188,7 @@ if azienda_selezionata:
                     contenuto_gemini.append(prompt)
                     
                     response = client.models.generate_content(
-                        model='models/gemini-1.5-flash',
+                        model='gemini-1.5-pro',
                         contents=contenuto_gemini,
                         config=types.GenerateContentConfig(response_mime_type="application/json")
                     )
