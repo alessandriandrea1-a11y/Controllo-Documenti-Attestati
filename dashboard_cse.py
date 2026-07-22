@@ -16,16 +16,34 @@ import pypdfium2 as pdfium
 st.set_page_config(layout="wide", page_title="Dashboard CSE — Controllo Totale Diretto")
 
 # --- CONFIGURAZIONE DROPBOX E DATABASE ---
-DROPBOX_TOKEN = st.secrets.get("DROPBOX_TOKEN", "IL_TUO_TOKEN_TEMPORANEO_QUI")
 DB_FILE_NAME = "database_sicurezza.db"
 
+# Chiavi Dropbox dell'applicazione
+DROPBOX_APP_KEY = st.secrets.get("DROPBOX_APP_KEY", "lz3k1850lvdbpe2")
+DROPBOX_APP_SECRET = st.secrets.get("DROPBOX_APP_SECRET", "jcqww6ots1z1r9t")
+DROPBOX_REFRESH_TOKEN = st.secrets.get("DROPBOX_REFRESH_TOKEN", "")
+
 def get_dropbox_client():
-    if DROPBOX_TOKEN and DROPBOX_TOKEN != "IL_TUO_TOKEN_TEMPORANEO_QUI":
+    token = st.secrets.get("DROPBOX_TOKEN", "")
+    
+    # 1. Tenta prima con il Refresh Token permanente se configurato
+    if DROPBOX_REFRESH_TOKEN:
         try:
-            return dropbox.Dropbox(DROPBOX_TOKEN)
+            return dropbox.Dropbox(
+                app_key=DROPBOX_APP_KEY,
+                app_secret=DROPBOX_APP_SECRET,
+                oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
+            )
         except Exception as e:
-            st.error(f"⚠️ Errore connessione Dropbox: {e}")
-            return None
+            st.error(f"⚠️ Errore connessione Refresh Token Dropbox: {e}")
+            
+    # 2. Tenta con il Token standard se presente nei Secrets
+    elif token:
+        try:
+            return dropbox.Dropbox(token)
+        except Exception as e:
+            st.error(f"⚠️ Errore connessione Token Dropbox: {e}")
+            
     return None
 
 def download_db_from_dropbox():
@@ -62,7 +80,6 @@ def inizializza_db():
     )
     """)
     
-    # Controllo sicuro per verificare se la colonna percorso_dropbox esiste
     cursor.execute("PRAGMA table_info(aziende)")
     colonne = [riga[1] for riga in cursor.fetchall()]
     if "percorso_dropbox" not in colonne:
@@ -319,6 +336,27 @@ with st.sidebar:
         api_key_inserita = ""
 
     st.write("---")
+    st.markdown("### 🔑 AUTENTICAZIONE DROPBOX VELOCE")
+    with st.expander("🛠️ Genera / Aggiorna Token Dropbox"):
+        auth_flow = dropbox.DropboxOAuth2FlowNoOption(
+            DROPBOX_APP_KEY,
+            DROPBOX_APP_SECRET,
+            token_access_type="offline"
+        )
+        auth_url = auth_flow.start()
+        st.markdown(f"[👉 **Clicca qui per autorizzare Dropbox**]({auth_url})")
+        code_input = st.text_input("Incolla qui il codice ricevuto da Dropbox:")
+        if st.button("Salva Token Permanentemente"):
+            if code_input:
+                try:
+                    oauth_result = auth_flow.finish(code_input.strip())
+                    st.secrets["DROPBOX_REFRESH_TOKEN"] = oauth_result.refresh_token
+                    st.success("✅ Dropbox Connesso con successo per sempre!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Errore attivazione: {e}")
+
+    st.write("---")
     st.markdown("### 🔐 ACCESSO UTENTE")
     ruolo = st.selectbox("Seleziona il tuo ruolo:", ["👀 Solo Visualizzazione", "🛠️ Coordinatore (Modifica)"])
     
@@ -379,7 +417,7 @@ if azienda_selezionata:
                 if st.button("🚀 SCANSIONA ED ELABORA TUTTI I FILE DELLA CARTELLA DROPBOX"):
                     dbx = get_dropbox_client()
                     if not dbx:
-                        st.error("⚠️ Nessun Token Dropbox configurato.")
+                        st.error("⚠️ Nessun Token Dropbox attivo. Usa il box 'Autenticazione Dropbox Veloce' nella barra a sinistra.")
                     elif not api_key_inserita:
                         st.error("🚨 Manca la Groq API Key! Inseriscila nella barra a sinistra.")
                     else:
