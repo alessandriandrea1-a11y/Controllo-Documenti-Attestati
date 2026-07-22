@@ -28,7 +28,6 @@ def get_dropbox_client():
     app_key = st.secrets.get("DROPBOX_APP_KEY", DROPBOX_APP_KEY)
     app_secret = st.secrets.get("DROPBOX_APP_SECRET", DROPBOX_APP_SECRET)
     
-    # 1. Utilizza il Refresh Token Permanente se presente
     if refresh_token:
         try:
             return dropbox.Dropbox(
@@ -39,7 +38,6 @@ def get_dropbox_client():
         except Exception as e:
             st.error(f"⚠️ Errore connessione Refresh Token Dropbox: {e}")
             
-    # 2. Utilizza eventuale Short-lived token temporaneo
     token = st.secrets.get("DROPBOX_TOKEN", "")
     if token:
         try:
@@ -70,7 +68,7 @@ def upload_db_to_dropbox():
 
 download_db_from_dropbox()
 
-# --- DATABASE LOCAL SQLITE E CREAZIONE TABELLE SICURA ---
+# --- DATABASE LOCAL SQLITE E CREAZIONE TABELLE ---
 conn = sqlite3.connect(DB_FILE_NAME, check_same_thread=False, timeout=20)
 cursor = conn.cursor()
 
@@ -148,7 +146,7 @@ def normalizza_nome_documento(testo_doc):
         return "Formazione RSPP"
     elif "preposto" in t:
         return "Formazione Preposto"
-    elif "medica" in t or "idoneit" in t or "sanitar" in t:
+    elif "medica" in t or "idoneit" in t or "sanitar" in t or "doc" in t:
         return "Idoneità Sanitaria"
     elif "accordo" in t or "generale" in t or "specifica" in t:
         return "Formazione Generale / Specifica"
@@ -163,12 +161,19 @@ def estrai_testo_da_bytes(file_bytes, nome_file):
             pdf = pdfium.PdfDocument(file_bytes)
             for page in pdf:
                 textpage = page.get_textpage()
-                testo += textpage.get_text_range() + "\n"
+                t_pag = textpage.get_text_range()
+                testo += t_pag + "\n"
         elif nome_lower.endswith(".docx"):
             testo = docx2txt.process(io.BytesIO(file_bytes))
     except Exception:
         pass
-    return testo.strip()
+    
+    # Se il testo estratto direttamente è povero/assente, usa il nome del file come supporto fortissimo
+    testo_pulito = testo.strip()
+    if len(testo_pulito) < 10:
+        testo_pulito = f"NOME FILE DOCUMENTO: {nome_file}\nContenuto testo scarso da scansione."
+        
+    return testo_pulito
 
 def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_selezionata):
     nome_lower = nome_file.lower()
@@ -191,37 +196,35 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_sele
         return None
 
     testo_estratto = estrai_testo_da_bytes(file_bytes, nome_file)
-    if not testo_estratto:
-        return "Nessun testo estraibile"
 
     fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
     data_oggi = datetime.now(fuso_orario).strftime("%d/%m/%Y")
 
     prompt = f"""
-    Sei un esperto CSE di sicurezza sul lavoro. Analizza questo documento.
+    Sei un esperto CSE di sicurezza sul lavoro. Analizza questo documento o nome file.
     LA DATA ODIERNA DI RIFERIMENTO È TASSATIVAMENTE: {data_oggi}.
+    NOME DEL FILE ORIGINALE: "{nome_file}"
+    TESTO ESTRATTO DAL FILE:
+    ---
+    {testo_estratto}
+    ---
 
-    STEP 1 - FILTRO PERTINENZA:
-    Determina se questo documento riguarda un SINGOLO LAVORATORE (es. Attestato Formazione, Visita Medica, Idoneità, Abilitazione, Nomina).
-    Se è un documento AZIENDALE generale (es. POS, DURC, Visura Camerale, Fattura, Verbale, Valutazione Rischi, Nomina RSPP Generale), imposta "documento_pertinente": false.
+    REGOLE IMPORTANTE PERTINENZA:
+    1. Se il nome del file o il testo contiene parole come 'ATT', 'ATTESTATO', 'DOC', 'VISITA', 'IDONEITA', 'SPAZI CONFINATI', 'FORMAZIONE', o il NOME E COGNOME DI UN OPERAIO, DEVI TASSATIVAMENTE TRATTARLO COME PERTINENTE ("documento_pertinente": true).
+    2. Solo se si tratta di documenti esplicitamente aziendali generali come (POS, DURC, Visura, DVR, Verbali di Cantiere) imposta "documento_pertinente": false.
 
-    STEP 2 - ESTRAZIONE (Solo se "documento_pertinente": true):
-    1. NOME LAVORATORE: Nome e Cognome esatto della persona (es. "MAHMOUD ALI EZZAT ALI"). No corsi o parentesi.
-    2. DATA DI SCADENZA:
-       - Se è un ATTESTATO DI FORMAZIONE e non c'è la scadenza esplicita, CALCOLA aggiungendo 5 ANNI alla data del corso.
-       - Se è VISITA MEDICA / IDONEITÀ, usa la data espressa.
-    3. STATO RISPETTO A OGGI ({data_oggi}):
-       - Futura (>60 giorni da {data_oggi}): "In Regola"
-       - Prossimi 60 giorni: "In Scadenza"
-       - Passata rispetto a {data_oggi}: "Scaduto"
-    4. PRESCRIZIONI MEDICHE: solo per idoneità/visite mediche, altrimenti "Nessuna prescrizione rilevata".
+    ESTRAZIONE DATI:
+    - NOME LAVORATORE: Estrai il nome e cognome dal testo o dal NOME DEL FILE (es. se il file si chiama "ATT. SPAZI CONFINATI HMED ELSAYED AHMAD", il lavoratore è "HMED ELSAYED AHMAD").
+    - DATA DI SCADENZA: Estrai la data dal testo o dal nome del file (es. 2025). Se è formazione e c'è solo l'anno o data corso, aggiungi 5 anni. Se non trovi la data scrivi "Illimitato".
+    - STATO RISPETTO A {data_oggi}: "In Regola", "In Scadenza" o "Scaduto".
+    - PRESCRIZIONI MEDICHE: solo se presenti nell'idoneità, altrimenti "Nessuna prescrizione rilevata".
 
-    Rispondi ESCLUSIVAMENTE in JSON:
+    Rispondi ESCLUSIVAMENTE in formato JSON valido:
     {{
         "documento_pertinente": true,
         "lavoratore": "NOME COGNOME",
-        "mansione": "MANSIONE (es. Operaio)",
-        "documento_nome": "Nome esatto corso/documento",
+        "mansione": "Operaio",
+        "documento_nome": "Nome Tipo Corso o Idoneità",
         "data_scadenza": "DD/MM/AAAA",
         "stato_calcolato": "In Regola / In Scadenza / Scaduto",
         "prescrizione_medica": "Nessuna prescrizione rilevata"
@@ -245,7 +248,7 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_sele
         dati_ai = json.loads(chat_completion.choices[0].message.content)
 
         if not dati_ai.get("documento_pertinente", True):
-            return "Documento aziendale ignorato (non è un attestato dipendente)"
+            return "Documento aziendale generico (non riguarda un singolo lavoratore)"
 
         nom_lav = pulisci_nome_rigido(dati_ai.get("lavoratore"))
         mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
@@ -403,6 +406,15 @@ with st.sidebar:
                 st.rerun()
             except sqlite3.IntegrityError: 
                 st.error("Esiste già.")
+
+        if azienda_selezionata:
+            if st.button(f"🗑️ Elimina Azienda ({azienda_selezionata})"):
+                cursor.execute("DELETE FROM lavoratori WHERE azienda_id = (SELECT id FROM aziende WHERE nome = ?)", (azienda_selezionata,))
+                cursor.execute("DELETE FROM aziende WHERE nome = ?", (azienda_selezionata,))
+                conn.commit()
+                upload_db_to_dropbox()
+                st.success("Azienda eliminata!")
+                st.rerun()
                     
         st.write("---")
         st.markdown("### 📤 UPLOAD MANUALE (PDF, DOCX, ZIP)")
@@ -430,7 +442,7 @@ if azienda_selezionata:
                 if st.button("🚀 SCANSIONA ED ELABORA TUTTI I FILE DELLA CARTELLA DROPBOX"):
                     dbx = get_dropbox_client()
                     if not dbx:
-                        st.error("⚠️ Nessun Token Dropbox attivo. Incolla il Refresh Token nei Secrets.")
+                        st.error("⚠️ Nessun Token Dropbox attivo.")
                     elif not api_key_inserita:
                         st.error("🚨 Manca la Groq API Key! Inseriscila nella barra a sinistra.")
                     else:
