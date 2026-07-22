@@ -8,6 +8,7 @@ import zipfile
 import dropbox
 import docx2txt
 import re
+import requests
 from datetime import datetime
 import zoneinfo
 from groq import Groq
@@ -18,27 +19,29 @@ st.set_page_config(layout="wide", page_title="Dashboard CSE — Controllo Totale
 # --- CONFIGURAZIONE DROPBOX E DATABASE ---
 DB_FILE_NAME = "database_sicurezza.db"
 
-# Chiavi Dropbox dell'applicazione
 DROPBOX_APP_KEY = st.secrets.get("DROPBOX_APP_KEY", "lz3k1850lvdbpe2")
 DROPBOX_APP_SECRET = st.secrets.get("DROPBOX_APP_SECRET", "jcqww6ots1z1r9t")
 DROPBOX_REFRESH_TOKEN = st.secrets.get("DROPBOX_REFRESH_TOKEN", "")
 
 def get_dropbox_client():
-    token = st.secrets.get("DROPBOX_TOKEN", "")
+    refresh_token = st.secrets.get("DROPBOX_REFRESH_TOKEN", DROPBOX_REFRESH_TOKEN)
+    app_key = st.secrets.get("DROPBOX_APP_KEY", DROPBOX_APP_KEY)
+    app_secret = st.secrets.get("DROPBOX_APP_SECRET", DROPBOX_APP_SECRET)
     
-    # 1. Tenta prima con il Refresh Token permanente se configurato
-    if DROPBOX_REFRESH_TOKEN:
+    # 1. Utilizza il Refresh Token Permanente se presente
+    if refresh_token:
         try:
             return dropbox.Dropbox(
-                app_key=DROPBOX_APP_KEY,
-                app_secret=DROPBOX_APP_SECRET,
-                oauth2_refresh_token=DROPBOX_REFRESH_TOKEN
+                app_key=app_key,
+                app_secret=app_secret,
+                oauth2_refresh_token=refresh_token
             )
         except Exception as e:
             st.error(f"⚠️ Errore connessione Refresh Token Dropbox: {e}")
             
-    # 2. Tenta con il Token standard se presente nei Secrets
-    elif token:
+    # 2. Utilizza eventuale Short-lived token temporaneo
+    token = st.secrets.get("DROPBOX_TOKEN", "")
+    if token:
         try:
             return dropbox.Dropbox(token)
         except Exception as e:
@@ -336,25 +339,35 @@ with st.sidebar:
         api_key_inserita = ""
 
     st.write("---")
-    st.markdown("### 🔑 AUTENTICAZIONE DROPBOX VELOCE")
-    with st.expander("🛠️ Genera / Aggiorna Token Dropbox"):
-        auth_flow = dropbox.DropboxOAuth2FlowNoOption(
-            DROPBOX_APP_KEY,
-            DROPBOX_APP_SECRET,
-            token_access_type="offline"
-        )
-        auth_url = auth_flow.start()
-        st.markdown(f"[👉 **Clicca qui per autorizzare Dropbox**]({auth_url})")
-        code_input = st.text_input("Incolla qui il codice ricevuto da Dropbox:")
-        if st.button("Salva Token Permanentemente"):
+    st.markdown("### 🔑 CONNETTI DROPBOX PERMANENTEMENTE")
+    with st.expander("🛠️ Genera Refresh Token"):
+        st.markdown(f"""
+        1. [👉 **Clicca qui per autorizzare Dropbox**](https://www.dropbox.com/oauth2/authorize?client_id={DROPBOX_APP_KEY}&response_type=code&token_access_type=offline)
+        2. Autorizza l'app e copia il codice fornito.
+        3. Incollalo subito sotto e premi il pulsante.
+        """)
+        code_input = st.text_input("Incolla il Codice Autorizzazione:")
+        if st.button("🚀 Ottieni Refresh Token"):
             if code_input:
                 try:
-                    oauth_result = auth_flow.finish(code_input.strip())
-                    st.secrets["DROPBOX_REFRESH_TOKEN"] = oauth_result.refresh_token
-                    st.success("✅ Dropbox Connesso con successo per sempre!")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Errore attivazione: {e}")
+                    res = requests.post(
+                        "https://api.dropbox.com/oauth2/token",
+                        data={
+                            "code": code_input.strip(),
+                            "grant_type": "authorization_code",
+                        },
+                        auth=(DROPBOX_APP_KEY, DROPBOX_APP_SECRET)
+                    )
+                    data = res.json()
+                    if "refresh_token" in data:
+                        r_token = data["refresh_token"]
+                        st.success("✅ Token Generato!")
+                        st.code(f'DROPBOX_REFRESH_TOKEN = "{r_token}"', language="toml")
+                        st.info("💡 Copia la riga di codice sopra e incollala nei tuoi Secrets su Streamlit Cloud!")
+                    else:
+                        st.error(f"Errore: {data.get('error_description', data)}")
+                except Exception as ex:
+                    st.error(f"Errore: {ex}")
 
     st.write("---")
     st.markdown("### 🔐 ACCESSO UTENTE")
@@ -417,7 +430,7 @@ if azienda_selezionata:
                 if st.button("🚀 SCANSIONA ED ELABORA TUTTI I FILE DELLA CARTELLA DROPBOX"):
                     dbx = get_dropbox_client()
                     if not dbx:
-                        st.error("⚠️ Nessun Token Dropbox attivo. Usa il box 'Autenticazione Dropbox Veloce' nella barra a sinistra.")
+                        st.error("⚠️ Nessun Token Dropbox attivo. Incolla il Refresh Token nei Secrets.")
                     elif not api_key_inserita:
                         st.error("🚨 Manca la Groq API Key! Inseriscila nella barra a sinistra.")
                     else:
