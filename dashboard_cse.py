@@ -124,7 +124,7 @@ def pulisci_nome_rigido(nome_grezzo):
     nome = re.sub(r'\(.*?\)', '', str(nome_grezzo))
     nome = re.sub(r'[-–—]', ' ', nome)
     nome_pulito = re.sub(r'\s+', ' ', nome).strip().upper()
-    return nome_pulito if nome_pulito else "SCONOSCIUTO"
+    return nome_pulito if len(nome_pulito) > 3 else "SCONOSCIUTO"
 
 def normalizza_nome_documento(testo_doc):
     if not testo_doc:
@@ -168,10 +168,9 @@ def estrai_testo_da_bytes(file_bytes, nome_file):
     except Exception:
         pass
     
-    # Se il testo estratto direttamente è povero/assente, usa il nome del file come supporto fortissimo
     testo_pulito = testo.strip()
-    if len(testo_pulito) < 10:
-        testo_pulito = f"NOME FILE DOCUMENTO: {nome_file}\nContenuto testo scarso da scansione."
+    if len(testo_pulito) < 15:
+        testo_pulito = f"NOME DEL FILE: {nome_file}"
         
     return testo_pulito
 
@@ -201,31 +200,34 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_sele
     data_oggi = datetime.now(fuso_orario).strftime("%d/%m/%Y")
 
     prompt = f"""
-    Sei un esperto CSE di sicurezza sul lavoro. Analizza questo documento o nome file.
-    LA DATA ODIERNA DI RIFERIMENTO È TASSATIVAMENTE: {data_oggi}.
-    NOME DEL FILE ORIGINALE: "{nome_file}"
-    TESTO ESTRATTO DAL FILE:
+    Sei un addetto alla verifica documenti CSE in un cantiere.
+    DATA ODIERNA DI CONFRONTO: {data_oggi}.
+    NOME DEL FILE ANALIZZATO: "{nome_file}"
+    TESTO DEL FILE:
     ---
     {testo_estratto}
     ---
 
-    REGOLE IMPORTANTE PERTINENZA:
-    1. Se il nome del file o il testo contiene parole come 'ATT', 'ATTESTATO', 'DOC', 'VISITA', 'IDONEITA', 'SPAZI CONFINATI', 'FORMAZIONE', o il NOME E COGNOME DI UN OPERAIO, DEVI TASSATIVAMENTE TRATTARLO COME PERTINENTE ("documento_pertinente": true).
-    2. Solo se si tratta di documenti esplicitamente aziendali generali come (POS, DURC, Visura, DVR, Verbali di Cantiere) imposta "documento_pertinente": false.
+    ISTRUZIONI TASSATIVE PER L'ESTRAZIONE:
+    1. PERTINENZA: Tratta il file come "documento_pertinente": true solo se riguarda un LAVORATORE INDIVIDUALE (Attestato corso, Idoneità medica, Nomina, etc.). Se si tratta di documenti generali aziendali (POS, DURC, DVR, Verbali) imposta "documento_pertinente": false.
+    2. NOME LAVORATORE: Estrai SOLO Nome e Cognome reali dell'operaio/lavoratore (dal testo o dal nome file). NON inventare o unire frasi casuali. Se non c'è un nome chiaro, imposta "documento_pertinente": false.
+    3. DATA SCADENZA:
+       - Cerca la data esplicita di SCADENZA o di ESECUZIONE del corso/visita.
+       - Formato richiesto: GG/MM/AAAA.
+       - Se nel testo NON è presente alcuna data certa o leggibile, scrivi ESATTAMENTE "Da Verificare" nella data.
+    4. STATO:
+       - Se la data di scadenza è passata rispetto a {data_oggi}, imposta "Scaduto".
+       - Se scade nei prossimi 60 giorni, imposta "In Scadenza".
+       - Se la data è futura (> 60 giorni), imposta "In Regola".
+       - Se la data è "Da Verificare", imposta "In Scadenza".
 
-    ESTRAZIONE DATI:
-    - NOME LAVORATORE: Estrai il nome e cognome dal testo o dal NOME DEL FILE (es. se il file si chiama "ATT. SPAZI CONFINATI HMED ELSAYED AHMAD", il lavoratore è "HMED ELSAYED AHMAD").
-    - DATA DI SCADENZA: Estrai la data dal testo o dal nome del file (es. 2025). Se è formazione e c'è solo l'anno o data corso, aggiungi 5 anni. Se non trovi la data scrivi "Illimitato".
-    - STATO RISPETTO A {data_oggi}: "In Regola", "In Scadenza" o "Scaduto".
-    - PRESCRIZIONI MEDICHE: solo se presenti nell'idoneità, altrimenti "Nessuna prescrizione rilevata".
-
-    Rispondi ESCLUSIVAMENTE in formato JSON valido:
+    Rispondi SOLO in formato JSON:
     {{
         "documento_pertinente": true,
         "lavoratore": "NOME COGNOME",
         "mansione": "Operaio",
-        "documento_nome": "Nome Tipo Corso o Idoneità",
-        "data_scadenza": "DD/MM/AAAA",
+        "documento_nome": "Nome Corso / Visita Medica",
+        "data_scadenza": "GG/MM/AAAA oppure Da Verificare",
         "stato_calcolato": "In Regola / In Scadenza / Scaduto",
         "prescrizione_medica": "Nessuna prescrizione rilevata"
     }}
@@ -248,13 +250,16 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_sele
         dati_ai = json.loads(chat_completion.choices[0].message.content)
 
         if not dati_ai.get("documento_pertinente", True):
-            return "Documento aziendale generico (non riguarda un singolo lavoratore)"
+            return "Documento non individuale o non pertinente ignorato"
 
         nom_lav = pulisci_nome_rigido(dati_ai.get("lavoratore"))
+        if nom_lav == "SCONOSCIUTO":
+            return "Impossibile rilevare il nome del lavoratore"
+
         mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
         doc_grezzo = (dati_ai.get("documento_nome") or "Attestato Formazione").strip()
         doc_nome = normalizza_nome_documento(doc_grezzo)
-        data_scad = (dati_ai.get("data_scadenza") or "Illimitato").strip()
+        data_scad = (dati_ai.get("data_scadenza") or "Da Verificare").strip()
 
         stato_raw = str(dati_ai.get("stato_calcolato", "")).lower()
         if "scaduto" in stato_raw:
@@ -305,7 +310,7 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_sele
             conn.commit()
             upload_db_to_dropbox()
 
-            return f"Registrato: {doc_nome} - {nom_lav}"
+            return f"Registrato: {doc_nome} - {nom_lav} ({data_scad})"
 
     except Exception as e:
         return f"Errore AI: {str(e)}"
@@ -517,7 +522,7 @@ if azienda_selezionata:
             tabella_pulita = []
             for doc_nome, validita, data_scad in docs:
                 if not data_scad or data_scad == "None":
-                    data_scad = "Non richiesta / Illimitata"
+                    data_scad = "Da Verificare"
                 tabella_pulita.append([doc_nome, validita, data_scad])
             
             with st.expander(f"{accesso} — 👤 {nome} ({mansione})"):
