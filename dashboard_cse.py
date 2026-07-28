@@ -307,7 +307,7 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
                             return res, True
                         if res:
                             risultati.append(res)
-                        time.sleep(0.5)
+                        time.sleep(0.1) # Ridotto leggermente per reattività
             
             registra_file_processato(path_univoco)
             return f"ZIP elaborato ({len(risultati)} nuovi attestati trovati)", False
@@ -324,7 +324,7 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
         
         if not e_documento_sicurezza_pertinente(nome_file, testo_totale_pdf):
             registra_file_processato(path_univoco)
-            return None
+            return None, False
         
         for pag in pagine:
             testo_estratto = pag["testo"]
@@ -352,12 +352,12 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
                 return esito_pag, True
             if esito_pag:
                 messaggi_esito.append(esito_pag)
-            time.sleep(0.3)
+            time.sleep(0.1)
             
         registra_file_processato(path_univoco)
         if messaggi_esito:
             return " | ".join(messaggi_esito), False
-        return None
+        return None, False
 
     else:
         testo_estratto = ""
@@ -368,7 +368,7 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
             
         if not e_documento_sicurezza_pertinente(nome_file, testo_estratto):
             registra_file_processato(path_univoco)
-            return None
+            return None, False
             
         esito, stopped = _esegui_chiamata_ai_e_salvataggio(
             testo_estratto=testo_estratto,
@@ -527,6 +527,9 @@ PASSWORD_CORRETTA = st.secrets.get("ADMIN_PASSWORD", "Criansa2026")
 if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = 0
 
+if "scansione_in_corso" not in st.session_state:
+    st.session_state["scansione_in_corso"] = False
+
 with st.sidebar:
     st.markdown("### 🧠 CONFIGURAZIONE GROQ AI")
     api_key_manuale = st.text_input("Inserisci l'API Key di Groq (gsk_...):", type="password")
@@ -620,14 +623,29 @@ if azienda_selezionata:
             if percorso_dropbox_ditta:
                 st.caption(f"Cartella collegata: `{percorso_dropbox_ditta}`")
                 
-                if st.button("🚀 SCANSIONA / RIPRENDI SCANSIONE"):
+                col_Avvia, col_Stop = st.columns(2)
+                with col_Avvia:
+                    avvia_scansione = st.button("🚀 SCANSIONA / RIPRENDI")
+                with col_Stop:
+                    ferma_scansione = st.button("🛑 INTERROMPI SCANSIONE")
+
+                if ferma_scansione:
+                    st.session_state["scansione_in_corso"] = False
+                    st.warning("⚠️ Richiesta di interruzione registrata. La scansione si fermerà a breve.")
+
+                if avvia_scansione:
+                    st.session_state["scansione_in_corso"] = True
+
+                if st.session_state["scansione_in_corso"]:
                     dbx = get_dropbox_client()
                     if not dbx:
                         st.error("⚠️ Nessun Token Dropbox attivo.")
+                        st.session_state["scansione_in_corso"] = False
                     elif not api_key_inserita:
                         st.error("🚨 Inserisci la chiave Groq API a sinistra!")
+                        st.session_state["scansione_in_corso"] = False
                     else:
-                        with st.spinner("📦 Scansione in corso (con micro-controllo interno e filtro pertinenza)..."):
+                        with st.spinner("📦 Scansione in corso... (Premi 'Interrompi Scansione' per fermare in qualsiasi momento)"):
                             client = Groq(api_key=api_key_inserita)
                             try:
                                 res = dbx.files_list_folder(percorso_dropbox_ditta, recursive=True)
@@ -637,6 +655,11 @@ if azienda_selezionata:
                                 bloccato_per_limit = False
                                 
                                 for entry in file_list:
+                                    # Controllo in tempo reale se l'utente ha premuto stop
+                                    if not st.session_state["scansione_in_corso"]:
+                                        st.info("🛑 Scansione interrotta manualmente dall'utente.")
+                                        break
+
                                     if isinstance(entry, dropbox.files.FileMetadata):
                                         if entry.name.lower().endswith(('.pdf', '.docx', '.zip')):
                                             path_univoco = entry.path_lower
@@ -644,7 +667,7 @@ if azienda_selezionata:
                                             if e_file_gia_processato(path_univoco):
                                                 continue
                                                 
-                                            st.write(f"🔍 Micro-controllo file: `{entry.name}`...")
+                                            st.write(f"🔍 Controllo file: `{entry.name}`...")
                                             _, file_res = dbx.files_download(entry.path_lower)
                                             f_bytes = file_res.content
                                             
@@ -666,16 +689,19 @@ if azienda_selezionata:
                                                 processed += 1
                                             else:
                                                 scartati += 1
-                                            time.sleep(0.2)
+                                            time.sleep(0.1)
                                 
+                                st.session_state["scansione_in_corso"] = False
                                 if bloccato_per_limit:
-                                    st.warning("⚠️ **Scansione messa in pausa.** Token Groq terminati. Inserisci una nuova API Key a sinistra o attendi il reset, poi premi **'🚀 RIPRENDI SCANSIONE'**.")
+                                    st.warning("⚠️ **Scansione messa in pausa.** Token Groq esauriti.")
                                 else:
-                                    st.success(f"✅ Scansione completata! Elaborati {processed} file pertinenti. Scartati automaticamente {scartati} file non inerenti.")
+                                    st.success(f"✅ Scansione completata/interrotta. Elaborati {processed} file. Scartati {scartati} file non inerenti.")
                                 
+                                time.sleep(1)
                                 st.rerun()
                             except Exception as ex_dbx:
                                 st.error(f"⚠️ Errore lettura cartella Dropbox: {ex_dbx}")
+                                st.session_state["scansione_in_corso"] = False
             else:
                 st.warning("Nessun percorso Dropbox inserito per questa ditta.")
 
