@@ -9,8 +9,9 @@ import dropbox
 import docx2txt
 import re
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import zoneinfo
+import base64
 from groq import Groq
 import pypdfium2 as pdfium
 
@@ -153,26 +154,63 @@ def normalizza_nome_documento(testo_doc):
     else:
         return testo_doc.strip().title()
 
-def estrai_testo_da_bytes(file_bytes, nome_file):
+def estrai_testo_e_immagine_da_pdf(file_bytes):
     testo = ""
-    nome_lower = nome_file.lower()
+    prima_pagina_base64 = None
     try:
-        if nome_lower.endswith(".pdf"):
-            pdf = pdfium.PdfDocument(file_bytes)
-            for page in pdf:
-                textpage = page.get_textpage()
-                t_pag = textpage.get_text_range()
-                testo += t_pag + "\n"
-        elif nome_lower.endswith(".docx"):
-            testo = docx2txt.process(io.BytesIO(file_bytes))
+        pdf = pdfium.PdfDocument(file_bytes)
+        for page in pdf:
+            textpage = page.get_textpage()
+            testo += textpage.get_text_range() + "\n"
+        
+        # Se il testo estratto è troppo breve, estraiamo la prima pagina come immagine (scansione)
+        if len(testo.strip()) < 30 and len(pdf) > 0:
+            page = pdf[0]
+            image = page.render(scale=2).to_pil()
+            buffered = io.BytesIO()
+            image.save(buffered, format="JPEG")
+            prima_pagina_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
     except Exception:
         pass
-    
-    testo_pulito = testo.strip()
-    if len(testo_pulito) < 15:
-        testo_pulito = f"NOME DEL FILE: {nome_file}"
         
-    return testo_pulito
+    return testo.strip(), prima_pagina_base64
+
+def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita):
+    fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
+    oggi = datetime.now(fuso_orario).date()
+    data_finale = None
+
+    # Tenta di leggere la data di scadenza esplicita
+    if data_scad_str and data_scad_str != "NON_PRESENTI":
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+            try:
+                data_finale = datetime.strptime(data_scad_str, fmt).date()
+                break
+            except ValueError:
+                pass
+
+    # Se manca la data esplicita, calcolala da emissione + anni di validità
+    if not data_finale and data_emissione_str and data_emissione_str != "NON_PRESENTI" and anni_validita:
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+            try:
+                dt_em = datetime.strptime(data_emissione_str, fmt).date()
+                data_finale = dt_em.replace(year=dt_em.year + int(anni_validita))
+                break
+            except Exception:
+                pass
+
+    if not data_finale:
+        return "Da Verificare", "🟡 In Scadenza"
+
+    data_formattata = data_finale.strftime("%d/%m/%Y")
+    giorni_rimanenti = (data_finale - oggi).days
+
+    if giorni_rimanenti < 0:
+        return data_formattata, "🔴 Scaduto"
+    elif giorni_rimanenti <= 60:
+        return data_formattata, "🟡 In Scadenza"
+    else:
+        return data_formattata, "🟢 In Regola"
 
 def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_selezionata):
     nome_lower = nome_file.lower()
@@ -194,60 +232,68 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_sele
     if not (nome_lower.endswith(".pdf") or nome_lower.endswith(".docx")):
         return None
 
-    testo_estratto = estrai_testo_da_bytes(file_bytes, nome_file)
+    testo_estratto = ""
+    img_base64 = None
 
-    fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
-    data_oggi = datetime.now(fuso_orario).strftime("%d/%m/%Y")
+    if nome_lower.endswith(".pdf"):
+        testo_estratto, img_base64 = estrai_testo_e_immagine_da_pdf(file_bytes)
+    elif nome_lower.endswith(".docx"):
+        try:
+            testo_estratto = docx2txt.process(io.BytesIO(file_bytes))
+        except Exception:
+            testo_estratto = ""
 
-    prompt = f"""
-    Sei un addetto alla verifica documenti CSE in un cantiere.
-    DATA ODIERNA DI CONFRONTO: {data_oggi}.
-    NOME DEL FILE ANALIZZATO: "{nome_file}"
-    TESTO DEL FILE:
-    ---
-    {testo_estratto}
-    ---
+    system_prompt = """
+Sei un esperto verificatore di documenti di cantiere e sicurezza sul lavoro (CSE).
+Analizza il documento ed estrai con massima precisione i dati richiesti.
 
-    ISTRUZIONI TASSATIVE PER L'ESTRAZIONE:
-    1. PERTINENZA: Tratta il file come "documento_pertinente": true solo se riguarda un LAVORATORE INDIVIDUALE (Attestato corso, Idoneità medica, Nomina, etc.). Se si tratta di documenti generali aziendali (POS, DURC, DVR, Verbali) imposta "documento_pertinente": false.
-    2. NOME LAVORATORE: Estrai SOLO Nome e Cognome reali dell'operaio/lavoratore (dal testo o dal nome file). NON inventare o unire frasi casuali. Se non c'è un nome chiaro, imposta "documento_pertinente": false.
-    3. DATA SCADENZA:
-       - Cerca la data esplicita di SCADENZA o di ESECUZIONE del corso/visita.
-       - Formato richiesto: GG/MM/AAAA.
-       - Se nel testo NON è presente alcuna data certa o leggibile, scrivi ESATTAMENTE "Da Verificare" nella data.
-    4. STATO:
-       - Se la data di scadenza è passata rispetto a {data_oggi}, imposta "Scaduto".
-       - Se scade nei prossimi 60 giorni, imposta "In Scadenza".
-       - Se la data è futura (> 60 giorni), imposta "In Regola".
-       - Se la data è "Da Verificare", imposta "In Scadenza".
+REGOLE TASSATIVE PER LE DATE:
+1. Distingui bene la DATA DI NASCITA del corsista dalla DATA DI RILASCIO/EMISSIONE dell'attestato.
+2. Trova se presente la DATA DI SCADENZA esplicita (es. "Scade il", "Valido fino al").
+3. Se la data di scadenza NON è scritta, individua quanti ANNI DI VALIDITÀ ha il corso (es. Primo Soccorso = 3 anni, Antincendio = 5 anni, Lavori in quota = 5 anni).
+4. Se una data non è leggibile, imposta "NON_PRESENTI". NON inventare MAI date!
 
-    Rispondi SOLO in formato JSON:
-    {{
-        "documento_pertinente": true,
-        "lavoratore": "NOME COGNOME",
-        "mansione": "Operaio",
-        "documento_nome": "Nome Corso / Visita Medica",
-        "data_scadenza": "GG/MM/AAAA oppure Da Verificare",
-        "stato_calcolato": "In Regola / In Scadenza / Scaduto",
-        "prescrizione_medica": "Nessuna prescrizione rilevata"
-    }}
-    """
+Restituisci ESCLUSIVAMENTE un JSON con questo formato:
+{
+    "documento_pertinente": true/false,
+    "lavoratore": "NOME COGNOME",
+    "mansione": "Operaio/Preposto/ecc",
+    "documento_nome": "Titolo Corso o Visita Medica",
+    "data_emissione": "GG/MM/AAAA oppure NON_PRESENTI",
+    "data_scadenza": "GG/MM/AAAA oppure NON_PRESENTI",
+    "anni_validita": 3/5 oppure null,
+    "prescrizione_medica": "Nessuna prescrizione rilevata oppure testo prescrizione"
+}
+"""
 
     try:
-        try:
-            chat_completion = client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model="llama-3.3-70b-versatile",
+        # Se il PDF era un'immagine/scansione senza testo, usiamo il modello VISION di Groq
+        if img_base64:
+            response = client.chat.completions.create(
+                model="llama-3.2-11b-vision-preview",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": system_prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"}}
+                        ]
+                    }
+                ],
                 response_format={"type": "json_object"}
             )
-        except Exception:
-            chat_completion = client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model="llama-3.1-8b-instant",
+        else:
+            prompt_user = f"Nome del File: {nome_file}\nTesto Estratto:\n{testo_estratto}"
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt_user}
+                ],
                 response_format={"type": "json_object"}
             )
 
-        dati_ai = json.loads(chat_completion.choices[0].message.content)
+        dati_ai = json.loads(response.choices[0].message.content)
 
         if not dati_ai.get("documento_pertinente", True):
             return "Documento non individuale o non pertinente ignorato"
@@ -259,15 +305,13 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_sele
         mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
         doc_grezzo = (dati_ai.get("documento_nome") or "Attestato Formazione").strip()
         doc_nome = normalizza_nome_documento(doc_grezzo)
-        data_scad = (dati_ai.get("data_scadenza") or "Da Verificare").strip()
-
-        stato_raw = str(dati_ai.get("stato_calcolato", "")).lower()
-        if "scaduto" in stato_raw:
-            stato_calc = "🔴 Scaduto"
-        elif "scadenza" in stato_raw:
-            stato_calc = "🟡 In Scadenza"
-        else:
-            stato_calc = "🟢 In Regola"
+        
+        # Calcolo preciso data e stato tramite Python
+        data_scad, stato_calc = calcola_stato_e_data_python(
+            dati_ai.get("data_scadenza"),
+            dati_ai.get("data_emissione"),
+            dati_ai.get("anni_validita")
+        )
 
         prescr_raw = dati_ai.get("prescrizione_medica")
         prescr = prescr_raw.strip() if (prescr_raw and str(prescr_raw).lower() != "null") else 'Nessuna prescrizione rilevata'
