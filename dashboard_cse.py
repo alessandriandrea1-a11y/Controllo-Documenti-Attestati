@@ -111,17 +111,17 @@ def pulisci_nome_rigido(nome_raw):
     parti = [p.capitalize() for p in nome_pulisce.split() if len(p) > 1]
     return " ".join(parti) if parti else "SCONOSCIUTO"
 
-def estrai_testo_completo_pdf(file_bytes):
-    """Estrae il testo da tutte le pagine del PDF usando pypdf."""
+def estrai_testo_da_pdf_bytes(file_bytes):
+    """Estrae in modo pulito e sicuro il testo da tutte le pagine del PDF."""
     testo_totale = ""
     try:
         reader = pypdf.PdfReader(io.BytesIO(file_bytes))
         for idx, page in enumerate(reader.pages):
-            t_pag = page.extract_text()
-            if t_pag:
-                testo_totale += f"\n--- PAGINA {idx+1} ---\n" + t_pag
+            testo_pagina = page.extract_text()
+            if testo_pagina:
+                testo_totale += f"\n--- PAGINA {idx + 1} ---\n" + testo_pagina
     except Exception as e:
-        st.error(f"Errore lettura testo PDF: {e}")
+        st.error(f"Errore nella lettura delle pagine del PDF: {e}")
     return testo_totale
 
 # ==========================================
@@ -183,36 +183,36 @@ def aggiorna_stato_generale_lavoratore(lavoratore_id):
         conn.commit()
 
 # ==========================================
-# 4. ESTRAZIONE AI MULTI-DOCUMENTO
+# 4. ANALISI MULTI-DOCUMENTO CON GROQ AI
 # ==========================================
 def elabora_singolo_documento_con_ai(file_bytes, nome_file, azienda_selezionata, path_univoco):
     if file_gia_processato(path_univoco):
         return f"File già elaborato: {nome_file}", True
 
-    testo_pdf = estrai_testo_completo_pdf(file_bytes)
+    # Estrazione testo reale multipagina via pypdf
+    testo_pdf = estrai_testo_da_pdf_bytes(file_bytes)
     if not testo_pdf.strip():
         registra_file_processato(path_univoco)
-        return f"Impossibile leggere il testo da {nome_file} (potrebbe essere una scansione senza testo).", False
+        return f"Impossibile leggere il testo da {nome_file} (potrebbe essere una scansione immagine senza testo).", False
 
     if not client_groq:
         return "Chiave API Groq non trovata.", False
 
     system_prompt = """
 Sei un esperto verificatore di documenti di cantiere e sicurezza sul lavoro (CSE).
-Analizza il testo estratto da un file PDF multipagina. 
+Analizza il testo estratto da questo file PDF multipagina appartenente a un singolo lavoratore.
 
-ATTENZIONE: Un singolo file PDF POTREBBE CONTENERE PIÙ DOCUMENTI O ATTESTATI DIVERSI per lo stesso lavoratore (es. Visita Medica, Formazione Generale/Specifica, Antincendio, Primo Soccorso, DPI, Unilav, Tesserino, ecc.).
+ATTENZIONE: Il file contiene PIÙ documenti o attestati differenti (es. Idoneità Sanitaria, Formazione Generale, Formazione Specifica, Antincendio, Primo Soccorso, Unilav, Tesserino, ecc.).
+Estrai TUTTI i singoli documenti/attestati trovati nel testo e le eventuali prescrizioni mediche.
 
-Estrai TUTTI i documenti/attestati rilevanti e le prescrizioni mediche trovate nel file.
-
-Restituisci ESCLUSIVAMENTE un JSON valido (senza testo di contorno o blocchi markdown) con questa struttura:
+Restituisci ESCLUSIVAMENTE un JSON valido con questa struttura esatta:
 {
     "lavoratore": "NOME COGNOME",
     "mansione": "Manovale/Carpentiere/ecc",
     "prescrizione_medica": "Eventuali prescrizioni sanitarie oppure 'Nessuna prescrizione rilevata'",
     "documenti": [
         {
-            "documento_nome": "Nome Specifico del Corso o Documento (es. Certificato Medico Idoneità, Corso Formazione Generale e Specifica, Verbale Consegna DPI)",
+            "documento_nome": "Nome Specifico dell'attestato o corso (es. Idoneità Sanitaria, Corso Antincendio)",
             "data_emissione": "GG/MM/AAAA oppure NON_PRESENTI",
             "data_scadenza": "GG/MM/AAAA oppure NON_PRESENTI",
             "anni_validita": 5
@@ -226,7 +226,7 @@ Restituisci ESCLUSIVAMENTE un JSON valido (senza testo di contorno o blocchi mar
             model="llama-3.1-8b-instant",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Nome File: {nome_file}\n\nTesto Documento Multipagina:\n{testo_pdf[:16000]}"}
+                {"role": "user", "content": f"Nome File: {nome_file}\n\nTesto Completo del PDF:\n{testo_pdf[:15000]}"}
             ],
             response_format={"type": "json_object"},
             temperature=0.1
@@ -243,10 +243,10 @@ Restituisci ESCLUSIVAMENTE un JSON valido (senza testo di contorno o blocchi mar
         prescr_raw = dati_ai.get("prescrizione_medica")
         prescr = prescr_raw.strip() if (prescr_raw and str(prescr_raw).lower() != "null") else 'Nessuna prescrizione rilevata'
 
-        lista_doc = dati_ai.get("documenti", [])
-        if not lista_doc:
+        lista_documenti = dati_ai.get("documenti", [])
+        if not lista_documenti:
             registra_file_processato(path_univoco)
-            return f"Nessun documento rilevante trovato in {nome_file}", False
+            return f"Nessun documento strutturato trovato in {nome_file}", False
 
         with get_db_connection() as conn:
             cursor = conn.cursor()
@@ -270,12 +270,11 @@ Restituisci ESCLUSIVAMENTE un JSON valido (senza testo di contorno o blocchi mar
                 """, (az_id, nom_lav, mans_lav, prescr))
                 op_id = cursor.lastrowid
 
-            # Salva CIASCUN documento trovato nel PDF multipagina
+            # Inseriamo uno a uno tutti gli attestati trovati nel faldone
             count_inseriti = 0
-            for doc_item in lista_doc:
+            for doc_item in lista_documenti:
                 doc_nome = (doc_item.get("documento_nome") or "Attestato Generico").strip()
                 data_em = doc_item.get("data_emissione", "NON_PRESENTI")
-
                 data_scad, stato_calc = calcola_stato_e_data_python(
                     doc_item.get("data_scadenza"),
                     data_em,
@@ -286,7 +285,7 @@ Restituisci ESCLUSIVAMENTE un JSON valido (senza testo di contorno o blocchi mar
                     SELECT id FROM documenti_lavoratori 
                     WHERE lavoratore_id = ? AND nome_file_origine = ? AND tipo_documento = ?
                 """, (op_id, nome_file, doc_nome))
-
+                
                 doc_esistente = cursor.fetchone()
 
                 if doc_esistente:
