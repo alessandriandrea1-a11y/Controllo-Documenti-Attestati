@@ -9,3 +9,4 @@ pypdfium2
 Pillow
 requests
 openpyxl
+PyMuPDF
