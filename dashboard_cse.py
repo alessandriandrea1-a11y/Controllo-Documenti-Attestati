@@ -121,7 +121,7 @@ def inizializza_db():
 
 inizializza_db()
 
-# --- UTILITIES PER PULIZIA E NORMALIZZAZIONE ---
+# --- UTILITIES PER PULIZIA E RICALCOLO STATO ---
 def pulisci_nome_rigido(nome_grezzo):
     if not nome_grezzo:
         return "SCONOSCIUTO"
@@ -156,6 +156,24 @@ def normalizza_nome_documento(testo_doc):
         return "Formazione Generale / Specifica"
     else:
         return testo_doc.strip().title()
+
+def aggiorna_stato_generale_lavoratore(lavoratore_id):
+    """Ricalcola lo stato generale (Abilitato/Monitorare/Interdetto) del lavoratore."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (lavoratore_id,))
+        tutti_stati = [r[0] for r in cursor.fetchall()]
+        stringa_totale = "".join(tutti_stati)
+        
+        if "🔴" in stringa_totale or not tutti_stati:
+            nuovo_accesso = "🔴 INTERDETTO"
+        elif "🟡" in stringa_totale:
+            nuovo_accesso = "🟡 MONITORARE"
+        else:
+            nuovo_accesso = "🟢 ABILITATO"
+        
+        cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, lavoratore_id))
+        conn.commit()
 
 def estrai_testo_e_immagine_da_pdf(file_bytes):
     testo = ""
@@ -215,7 +233,6 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
 def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_selezionata):
     nome_lower = nome_file.lower()
     
-    # Gestione ZIP ricorsiva corretta
     if nome_lower.endswith(".zip"):
         risultati = []
         try:
@@ -231,7 +248,7 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_sele
                         )
                         if res:
                             risultati.append(res)
-                        time.sleep(0.5)  # Previene Rate-limit API
+                        time.sleep(0.5)
             return f"ZIP elaborato ({len(risultati)} file elaborati)"
         except Exception as e:
             return f"Errore estrazione ZIP: {str(e)}"
@@ -344,21 +361,9 @@ Restituisci ESCLUSIVAMENTE un JSON con questo formato:
                     INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
                     VALUES (?, ?, ?, ?)
                 """, (op_id, doc_nome, stato_calc, data_scad))
-                
-                cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
-                tutti_stati = [r[0] for r in cursor.fetchall()]
-                stringa_totale = "".join(tutti_stati)
-                
-                if "🔴" in stringa_totale:
-                    nuovo_accesso = "🔴 INTERDETTO"
-                elif "🟡" in stringa_totale:
-                    nuovo_accesso = "🟡 MONITORARE"
-                else:
-                    nuovo_accesso = "🟢 ABILITATO"
-                
-                cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, op_id))
                 conn.commit()
 
+        aggiorna_stato_generale_lavoratore(op_id)
         upload_db_to_dropbox()
         return f"Registrato: {doc_nome} - {nom_lav} ({data_scad})"
 
@@ -586,11 +591,11 @@ if azienda_selezionata:
             
             with get_db_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT tipo_documento, stato_scadenza, data_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (lav_id,))
+                cursor.execute("SELECT id, tipo_documento, stato_scadenza, data_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (lav_id,))
                 docs = cursor.fetchall()
             
             tabella_pulita = []
-            for doc_nome, validita, data_scad in docs:
+            for d_id, doc_nome, validita, data_scad in docs:
                 if not data_scad or data_scad == "None":
                     data_scad = "Da Verificare"
                 tabella_pulita.append([doc_nome, validita, data_scad])
@@ -605,7 +610,37 @@ if azienda_selezionata:
                 else:
                     st.info("Nessun documento associato a questo lavoratore.")
                 
+                # --- SEZIONE CORREZIONE MANUALMENTE ABILITATA PER COORDINATORE ---
                 if ha_permesso_modifica:
+                    with st.expander("✏️ Modifica / Correggi Documenti o Date Manualmente"):
+                        if docs:
+                            st.write("Modifica le date o lo stato dei documenti in caso di errore dell'AI:")
+                            for d_id, doc_nome, validita, data_scad in docs:
+                                col_d1, col_d2, col_d3, col_d4 = st.columns([3, 2, 2, 1])
+                                
+                                with col_d1:
+                                    st.text(doc_nome)
+                                with col_d2:
+                                    nuova_data = st.text_input("Data Scadenza (GG/MM/AAAA):", value=data_scad, key=f"date_{d_id}")
+                                with col_d3:
+                                    nuovo_stato = st.selectbox("Stato:", ["🟢 In Regola", "🟡 In Scadenza", "🔴 Scaduto"], index=0 if "🟢" in validita else (1 if "🟡" in validita else 2), key=f"stat_{d_id}")
+                                with col_d4:
+                                    st.write("")
+                                    st.write("")
+                                    if st.button("💾", key=f"save_{d_id}", help="Salva modifica"):
+                                        with get_db_connection() as conn:
+                                            cursor = conn.cursor()
+                                            cursor.execute("UPDATE documenti_lavoratori SET data_scadenza = ?, stato_scadenza = ? WHERE id = ?", (nuova_data, nuovo_stato, d_id))
+                                            conn.commit()
+                                        aggiorna_stato_generale_lavoratore(lav_id)
+                                        upload_db_to_dropbox()
+                                        st.success("Modificato!")
+                                        st.rerun()
+                                        
+                        else:
+                            st.caption("Nessun documento presente da modificare.")
+
+                    st.write("")
                     if st.button(f"❌ Rimuovi Questo Lavoratore", key=f"del_{lav_id}"):
                         with get_db_connection() as conn:
                             cursor = conn.cursor()
