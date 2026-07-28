@@ -80,7 +80,10 @@ def upload_db_to_dropbox():
 download_db_from_dropbox()
 
 def get_db_connection():
-    return sqlite3.connect(DB_FILE_NAME, timeout=20)
+    # timeout alto per evitare blocchi temporanei su SQLite
+    conn = sqlite3.connect(DB_FILE_NAME, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL;")  # Migliora la gestione della concorrenza
+    return conn
 
 def inizializza_db():
     with get_db_connection() as conn:
@@ -118,7 +121,12 @@ def inizializza_db():
         )
         """)
         
-        # TABELLA DI MEMORIA: Tiene traccia dei file e dei sotto-file ZIP già analizzati
+        # MIGRATION AUTOMATICA: Aggiunge la colonna se non esiste nel vecchio DB
+        cursor.execute("PRAGMA table_info(documenti_lavoratori)")
+        colonne = [col[1] for col in cursor.fetchall()]
+        if "nome_file_origine" not in colonne:
+            cursor.execute("ALTER TABLE documenti_lavoratori ADD COLUMN nome_file_origine TEXT DEFAULT ''")
+        
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS file_processati (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,14 +140,12 @@ inizializza_db()
 
 # --- GESTIONE TRACCIAMENTO FILE ---
 def e_file_gia_processato(path_file):
-    """Verifica se uno specifico percorso o sotto-file ZIP è già stato salvato a DB"""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM file_processati WHERE path_file = ?", (path_file,))
         return cursor.fetchone() is not None
 
 def registra_file_processato(path_file):
-    """Marca un percorso file come completato"""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -250,7 +256,7 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
                             azienda_selezionata=azienda_selezionata
                         )
                         if stopped:
-                            return res, True  # Interrompe lo ZIP e segnala lo stop
+                            return res, True
                         if res:
                             risultati.append(res)
                         time.sleep(0.5)
@@ -397,7 +403,7 @@ Restituisci ESCLUSIVAMENTE un JSON:
     except Exception as e:
         err_msg = str(e)
         if "429" in err_msg or "rate_limit" in err_msg.lower():
-            return "🛑 LIMIT RATE GROQ RAGGIUNTO: Token temporaneamente esauriti.", True  # STOP!
+            return "🛑 LIMIT RATE GROQ RAGGIUNTO: Token temporaneamente esauriti.", True
         return f"Errore AI: {err_msg}", False
 
 # --- INTERFACCIA STREAMLIT ---
@@ -509,7 +515,6 @@ if azienda_selezionata:
             if percorso_dropbox_ditta:
                 st.caption(f"Cartella collegata: `{percorso_dropbox_ditta}`")
                 
-                # PULSANTE DI SCANSIONA / RIPRESA
                 if st.button("🚀 SCANSIONA / RIPRENDI SCANSIONE"):
                     dbx = get_dropbox_client()
                     if not dbx:
@@ -530,7 +535,6 @@ if azienda_selezionata:
                                         if entry.name.lower().endswith(('.pdf', '.docx', '.zip')):
                                             path_univoco = entry.path_lower
                                             
-                                            # Skip dei file già fatti in precedenza
                                             if e_file_gia_processato(path_univoco):
                                                 continue
                                                 
@@ -549,7 +553,7 @@ if azienda_selezionata:
                                             if stopped:
                                                 st.error(f"{msg}")
                                                 bloccato_per_limit = True
-                                                break  # Interrompe il ciclo per non sprecare chiamata e attendere
+                                                break
                                                 
                                             if msg:
                                                 st.info(f"➡️ {msg}")
@@ -557,7 +561,7 @@ if azienda_selezionata:
                                             time.sleep(0.5)
                                 
                                 if bloccato_per_limit:
-                                    st.warning("⚠️ **Scansione messa in pausa.** I token Groq sono temporaneamente terminati. Puoi attendere qualche minuto o inserire un'altra API Key a sinistra, poi premi di nuovo **'🚀 RIPRENDI SCANSIONE'** per continuare dall'ultimo file.")
+                                    st.warning("⚠️ **Scansione messa in pausa.** Token Groq terminati. Inserisci una nuova API Key a sinistra o attendi il reset, poi premi **'🚀 RIPRENDI SCANSIONE'**.")
                                 else:
                                     st.success(f"✅ Scansione completata! Elaborati {processed} nuovi file.")
                                 
