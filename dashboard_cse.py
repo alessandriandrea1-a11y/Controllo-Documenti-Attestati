@@ -203,9 +203,27 @@ def estrai_pagine_da_pdf(file_bytes):
         pass
     return pagine_estratte
 
-def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita):
+def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita, tipo_documento=""):
     fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
     oggi = datetime.now(fuso_orario).date()
+    
+    doc_lower = (tipo_documento or "").lower()
+    
+    # 1. GESTIONE DOCUMENTI SENZA SCADENZA (Tesserino, Consegna DPI, ecc.)
+    is_senza_scadenza = any(termine in doc_lower for termine in ["tesserino", "badge", "riconoscimento", "dpi", "consegna", "dispositivi"])
+    
+    if is_senza_scadenza:
+        # Per questi documenti l'importante è che ci sia la data di emissione/consegna
+        data_rif = data_emissione_str if (data_emissione_str and data_emissione_str != "NON_PRESENTI") else "Presente"
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+            try:
+                dt_rif = datetime.strptime(data_rif, fmt).date()
+                data_rif = dt_rif.strftime("%d/%m/%Y")
+                break
+            except Exception:
+                pass
+        return data_rif, "🟢 In Regola"
+
     data_finale = None
 
     if data_scad_str and data_scad_str != "NON_PRESENTI":
@@ -274,7 +292,6 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
     if not (nome_lower.endswith(".pdf") or nome_lower.endswith(".docx")):
         return None, False
 
-    # Gestione PDF multipagina iterando sulle singole pagine
     if nome_lower.endswith(".pdf"):
         pagine = estrai_pagine_da_pdf(file_bytes)
         messaggi_esito = []
@@ -314,7 +331,6 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
         return "Nessun dato utile estratto dal PDF", False
 
     else:
-        # DOCX singolo
         testo_estratto = ""
         try:
             testo_estratto = docx2txt.process(io.BytesIO(file_bytes))
@@ -334,16 +350,19 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
 def _esegui_chiamata_ai_e_salvataggio(testo_estratto, img_base64, nome_file, path_univoco, client, azienda_selezionata):
     system_prompt = """
 Sei un esperto verificatore di documenti di cantiere e sicurezza sul lavoro (CSE).
-Analizza il documento ed estrai con la massima precisione i dati del lavoratore e dell'attestato/visita medica.
+Analizza il documento ed estrai con la massima precisione i dati del lavoratore e del documento/attestato/visita medica/consegna DPI/tesserino.
+
+REGOLE IMPORTANTI SULLA SCADENZA:
+- Per i **Tesserini di riconoscimento / Badge** e per i **verbali di Consegna DPI (Dispositivi di Protezione Individuale)** NON ESISTE una data di scadenza per legge. Per questi documenti imposta "data_scadenza": "NON_PRESENTI" e "anni_validita": null, concentrandoti unicamente sull'estrazione della data di emissione o di consegna.
+- Per gli altri documenti (attestati di formazione, visite mediche, ecc.) estrai la data di scadenza o calcolala se c'è la validità in anni.
 
 Dati richiesti:
 1. Lavoratore (Nome e Cognome).
 2. Mansione.
-3. Nome ESATTO e SPECIFICO del corso/documento (es. "Attestato Antincendio", "Attestato Primo Soccorso", "Formazione Generale Lavoratori", "Formazione Specifica Rischio Alto", "Idoneità Sanitaria", "Patentino MMT / Carrellisti", "Corso Preposto"). 
-   IMPORTANTE: Non usare MAI solo parole generiche come "Attestato" o "Sicurezza". Sii il più preciso possibile per distinguerlo chiaramente da altri corsi del lavoratore.
-4. Data emissione/rilascio (GG/MM/AAAA) oppure NON_PRESENTI.
-5. Data di scadenza esplicita (GG/MM/AAAA) oppure NON_PRESENTI.
-6. Anni di validità (es. 3, 5) se non c'è la data di scadenza.
+3. Nome ESATTO e SPECIFICO del documento (es. "Tesserino di Riconoscimento", "Verbale Consegna DPI", "Attestato Antincendio", "Idoneità Sanitaria").
+4. Data emissione / rilascio / consegna (GG/MM/AAAA) oppure NON_PRESENTI.
+5. Data di scadenza esplicita (GG/MM/AAAA) oppure NON_PRESENTI (obbligatorio NON_PRESENTI per tesserini e DPI).
+6. Anni di validità (es. 3, 5) se applicabile, altrimenti null.
 7. Prescrizioni sanitarie (se visita medica).
 
 Restituisci ESCLUSIVAMENTE un JSON con questo schema:
@@ -351,10 +370,10 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
     "documento_pertinente": true,
     "lavoratore": "NOME COGNOME",
     "mansione": "Operaio/Preposto/ecc",
-    "documento_nome": "Nome Specifico e Distinto del Corso",
+    "documento_nome": "Nome Specifico del Documento",
     "data_emissione": "GG/MM/AAAA oppure NON_PRESENTI",
     "data_scadenza": "GG/MM/AAAA oppure NON_PRESENTI",
-    "anni_validita": 3,
+    "anni_validita": null,
     "prescrizione_medica": "Nessuna prescrizione rilevata"
 }
 """
@@ -403,7 +422,8 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
         data_scad, stato_calc = calcola_stato_e_data_python(
             dati_ai.get("data_scadenza"),
             data_em,
-            dati_ai.get("anni_validita")
+            dati_ai.get("anni_validita"),
+            tipo_documento=doc_nome
         )
 
         prescr_raw = dati_ai.get("prescrizione_medica")
@@ -685,7 +705,7 @@ if azienda_selezionata:
                     st.markdown(f'<div class="prescrizione-box">⚠️ **Prescrizioni Sanitarie:** {prescrizioni}</div>', unsafe_allow_html=True)
                 
                 if tabella_pulita:
-                    df = pd.DataFrame(tabella_pulita, columns=["Attestato / Visita Rilevata", "Validità AI", "Scadenza Calcolata", "File Origine"])
+                    df = pd.DataFrame(tabella_pulita, columns=["Attestato / Documento Rilevato", "Stato", "Data Scadenza / Consegna", "File Origine"])
                     st.dataframe(df, use_container_width=True, hide_index=True)
                 else:
                     st.info("Nessun documento associato a questo lavoratore.")
@@ -699,7 +719,7 @@ if azienda_selezionata:
                                 with col_d1:
                                     st.text(doc_nome)
                                 with col_d2:
-                                    nuova_data = st.text_input("Data Scadenza:", value=data_scad, key=f"date_{d_id}")
+                                    nuova_data = st.text_input("Data Scadenza/Consegna:", value=data_scad, key=f"date_{d_id}")
                                 with col_d3:
                                     nuovo_stato = st.selectbox("Stato:", ["🟢 In Regola", "🟡 In Scadenza", "🔴 Scaduto"], index=0 if "🟢" in validita else (1 if "🟡" in validita else 2), key=f"stat_{d_id}")
                                 with col_d4:
