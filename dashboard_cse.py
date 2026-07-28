@@ -256,11 +256,10 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
 def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
     nome_lower = nome_file.lower()
     
-    parole_escluse_nome = ["fattura", "fatture", "preventivo", "ordine", "ddt", "bolla", "contabilita", "estratto", "pagamento", "acconto", "saldo", "banca", "bonifico"]
-    if any(p in nome_lower for p in parole_escluse_nome):
-        testo_check = (testo_estratto or "").lower()
-        if not any(k in testo_check for k in ["attestato", "formazione", "corso sicurezza", "idoneità sanitaria", "visita medica"]):
-            return False
+    # 🚫 FILTRO RAPIDO ANTI-POS / FATTURE / DOCUMENTI GENERALI DA SCARTARE SUBITO
+    parole_da_scartare = ["pos", "p.o.s", "piano operativo", "fattura", "fatture", "preventivo", "ordine", "ddt", "bolla", "contabilita", "estratto", "pagamento", "acconto", "saldo", "banca", "bonifico", "contratto", "computo"]
+    if any(p in nome_lower for p in parole_da_scartare):
+        return False
 
     parole_chiave_sicurezza = [
         "attestato", "formazione", "corso", "sicurezza", "patentino", "idoneità", "idoneita", 
@@ -284,12 +283,21 @@ def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
 def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client, azienda_selezionata):
     nome_lower = nome_file.lower()
     
+    parole_da_scartare = ["pos", "p.o.s", "piano operativo", "fattura", "fatture", "preventivo", "ordine", "ddt", "bolla", "contabilita", "estratto", "pagamento", "acconto", "saldo", "banca", "bonifico", "contratto", "computo"]
+    if any(p in nome_lower for p in parole_da_scartare):
+        registra_file_processato(path_univoco)
+        return None, False
+
     if nome_lower.endswith(".zip"):
         risultati = []
         try:
             with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
                 for filename in z.namelist():
                     if filename.lower().endswith(('.pdf', '.docx')) and not filename.startswith('__MACOSX'):
+                        sub_name_lower = filename.lower()
+                        if any(p in sub_name_lower for p in parole_da_scartare):
+                            continue
+                            
                         unzipped_bytes = z.read(filename)
                         sub_path = f"{path_univoco}/{filename}"
                         
@@ -307,7 +315,7 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
                             return res, True
                         if res:
                             risultati.append(res)
-                        time.sleep(0.1) # Ridotto leggermente per reattività
+                        time.sleep(0.05)
             
             registra_file_processato(path_univoco)
             return f"ZIP elaborato ({len(risultati)} nuovi attestati trovati)", False
@@ -352,7 +360,7 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
                 return esito_pag, True
             if esito_pag:
                 messaggi_esito.append(esito_pag)
-            time.sleep(0.1)
+            time.sleep(0.05)
             
         registra_file_processato(path_univoco)
         if messaggi_esito:
@@ -621,7 +629,19 @@ if azienda_selezionata:
         with c_left:
             st.markdown("#### 📦 Analisi Automatica Cartella Dropbox")
             if percorso_dropbox_ditta:
-                st.caption(f"Cartella collegata: `{percorso_dropbox_ditta}`")
+                st.caption(f"Cartella base ditta: `{percorso_dropbox_ditta}`")
+            
+            # Campo opzionale per puntare solo a una sottocartella specifica (es. /DittaX/Nuovi_Aggiornamenti)
+            sottocartella_specifica = st.text_input(
+                "Sottocartella specifica (opzionale):", 
+                value="", 
+                placeholder="Es. /MioCantiere/Aggiornamenti"
+            ).strip()
+            
+            percorso_da_usare = pulisci_percorso_dropbox(sottocartella_specifica) if sottocartella_specifica else percorso_dropbox_ditta
+
+            if percorso_da_usare:
+                st.caption(f"Percorso effettivo di scansione: `{percorso_da_usare}`")
                 
                 col_Avvia, col_Stop = st.columns(2)
                 with col_Avvia:
@@ -631,7 +651,7 @@ if azienda_selezionata:
 
                 if ferma_scansione:
                     st.session_state["scansione_in_corso"] = False
-                    st.warning("⚠️ Richiesta di interruzione registrata. La scansione si fermerà a breve.")
+                    st.warning("⚠️ Richiesta di interruzione registrata.")
 
                 if avvia_scansione:
                     st.session_state["scansione_in_corso"] = True
@@ -645,17 +665,16 @@ if azienda_selezionata:
                         st.error("🚨 Inserisci la chiave Groq API a sinistra!")
                         st.session_state["scansione_in_corso"] = False
                     else:
-                        with st.spinner("📦 Scansione in corso... (Premi 'Interrompi Scansione' per fermare in qualsiasi momento)"):
+                        with st.spinner(f"📦 Scansione della cartella `{percorso_da_usare}` in corso..."):
                             client = Groq(api_key=api_key_inserita)
                             try:
-                                res = dbx.files_list_folder(percorso_dropbox_ditta, recursive=True)
+                                res = dbx.files_list_folder(percorso_da_usare, recursive=True)
                                 file_list = res.entries
                                 processed = 0
                                 scartati = 0
                                 bloccato_per_limit = False
                                 
                                 for entry in file_list:
-                                    # Controllo in tempo reale se l'utente ha premuto stop
                                     if not st.session_state["scansione_in_corso"]:
                                         st.info("🛑 Scansione interrotta manualmente dall'utente.")
                                         break
@@ -667,6 +686,12 @@ if azienda_selezionata:
                                             if e_file_gia_processato(path_univoco):
                                                 continue
                                                 
+                                            parole_da_scartare = ["pos", "p.o.s", "piano operativo", "fattura", "preventivo"]
+                                            if any(p in entry.name.lower() for p in parole_da_scartare):
+                                                registra_file_processato(path_univoco)
+                                                scartati += 1
+                                                continue
+
                                             st.write(f"🔍 Controllo file: `{entry.name}`...")
                                             _, file_res = dbx.files_download(entry.path_lower)
                                             f_bytes = file_res.content
@@ -689,13 +714,13 @@ if azienda_selezionata:
                                                 processed += 1
                                             else:
                                                 scartati += 1
-                                            time.sleep(0.1)
+                                            time.sleep(0.05)
                                 
                                 st.session_state["scansione_in_corso"] = False
                                 if bloccato_per_limit:
                                     st.warning("⚠️ **Scansione messa in pausa.** Token Groq esauriti.")
                                 else:
-                                    st.success(f"✅ Scansione completata/interrotta. Elaborati {processed} file. Scartati {scartati} file non inerenti.")
+                                    st.success(f"✅ Scansione completata. Elaborati {processed} attestati. Scartati {scartati} file.")
                                 
                                 time.sleep(1)
                                 st.rerun()
@@ -720,7 +745,7 @@ if azienda_selezionata:
                 elif esito:
                     st.success(f"🎉 Risultato: {esito}")
                 else:
-                    st.warning("⚠️ Il file è stato scartato perché non è stato riconosciuto come documento di sicurezza/attestato.")
+                    st.warning("⚠️ Il file è stato scartato perché non è un attestato di sicurezza o è un POS/documento escluso.")
                 st.rerun()
 
     # --- TABELLA LAVORATORI ---
