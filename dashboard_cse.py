@@ -80,9 +80,8 @@ def upload_db_to_dropbox():
 download_db_from_dropbox()
 
 def get_db_connection():
-    # timeout alto per evitare blocchi temporanei su SQLite
     conn = sqlite3.connect(DB_FILE_NAME, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL;")  # Migliora la gestione della concorrenza
+    conn.execute("PRAGMA journal_mode=WAL;")
     return conn
 
 def inizializza_db():
@@ -121,7 +120,7 @@ def inizializza_db():
         )
         """)
         
-        # MIGRATION AUTOMATICA: Aggiunge la colonna se non esiste nel vecchio DB
+        # Migration se la colonna non esiste
         cursor.execute("PRAGMA table_info(documenti_lavoratori)")
         colonne = [col[1] for col in cursor.fetchall()]
         if "nome_file_origine" not in colonne:
@@ -280,6 +279,7 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
         except Exception:
             testo_estratto = ""
 
+    # PROMPT SPECIFICO PER RICONOSCERE E DISTINGUERE GLI ATTESTATI
     system_prompt = """
 Sei un esperto verificatore di documenti di cantiere e sicurezza sul lavoro (CSE).
 Analizza il documento ed estrai con la massima precisione i dati del lavoratore e dell'attestato/visita medica.
@@ -287,18 +287,19 @@ Analizza il documento ed estrai con la massima precisione i dati del lavoratore 
 Dati richiesti:
 1. Lavoratore (Nome e Cognome).
 2. Mansione.
-3. Nome generico/tipo di corso (es. "Formazione Generale", "Primo Soccorso", "Antincendio", "Idoneità Sanitaria", "Carrellisti").
+3. Nome ESATTO e SPECIFICO del corso/documento (es. "Attestato Antincendio", "Attestato Primo Soccorso", "Formazione Generale Lavoratori", "Formazione Specifica Rischio Alto", "Idoneità Sanitaria", "Patentino MMT / Carrellisti", "Corso Preposto"). 
+   IMPORTANTE: Non usare MAI solo parole generiche come "Attestato" o "Sicurezza". Sii il più preciso possibile per distinguerlo chiaramente da altri corsi del lavoratore.
 4. Data emissione/rilascio (GG/MM/AAAA) oppure NON_PRESENTI.
 5. Data di scadenza esplicita (GG/MM/AAAA) oppure NON_PRESENTI.
 6. Anni di validità (es. 3, 5) se non c'è la data di scadenza.
 7. Prescrizioni sanitarie (se visita medica).
 
-Restituisci ESCLUSIVAMENTE un JSON:
+Restituisci ESCLUSIVAMENTE un JSON con questo schema:
 {
     "documento_pertinente": true,
     "lavoratore": "NOME COGNOME",
     "mansione": "Operaio/Preposto/ecc",
-    "documento_nome": "Nome Specifico del Corso/Certificato",
+    "documento_nome": "Nome Specifico e Distinto del Corso",
     "data_emissione": "GG/MM/AAAA oppure NON_PRESENTI",
     "data_scadenza": "GG/MM/AAAA oppure NON_PRESENTI",
     "anni_validita": 3,
@@ -344,10 +345,8 @@ Restituisci ESCLUSIVAMENTE un JSON:
             return "Nome lavoratore non trovato", False
 
         mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
-        doc_base = (dati_ai.get("documento_nome") or "Attestato Generico").strip()
+        doc_nome = (dati_ai.get("documento_nome") or "Attestato Generico").strip()
         data_em = dati_ai.get("data_emissione", "NON_PRESENTI")
-        
-        doc_nome = doc_base
 
         data_scad, stato_calc = calcola_stato_e_data_python(
             dati_ai.get("data_scadenza"),
@@ -376,15 +375,17 @@ Restituisci ESCLUSIVAMENTE un JSON:
                     cursor.execute("INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche) VALUES (?, ?, ?, '🔴 Da Verificare', ?)", (az_id, nom_lav, mans_lav, prescr))
                     op_id = cursor.lastrowid
                 
-                cursor.execute("SELECT id, data_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ? AND tipo_documento = ?", (op_id, doc_nome))
+                # CONTROLLO MODIFICATO: Si basa sul NOME FILE ORIGINE, non sul tipo_documento.
+                # In questo modo, ogni file diverso dello stesso lavoratore diventa una nuova riga!
+                cursor.execute("SELECT id FROM documenti_lavoratori WHERE lavoratore_id = ? AND nome_file_origine = ?", (op_id, nome_file))
                 doc_esistente = cursor.fetchone()
                 
                 if doc_esistente:
                     cursor.execute("""
                         UPDATE documenti_lavoratori 
-                        SET stato_scadenza = ?, data_scadenza = ?, nome_file_origine = ?
+                        SET tipo_documento = ?, stato_scadenza = ?, data_scadenza = ?
                         WHERE id = ?
-                    """, (stato_calc, data_scad, nome_file, doc_esistente[0]))
+                    """, (doc_nome, stato_calc, data_scad, doc_esistente[0]))
                     msg_esito = f"🔄 Aggiornato: {doc_nome} ({nom_lav})"
                 else:
                     cursor.execute("""
