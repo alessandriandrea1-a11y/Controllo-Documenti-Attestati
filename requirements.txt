@@ -8,3 +8,4 @@ pdf2image
 pypdfium2
 Pillow
 requests
+openpyxl
