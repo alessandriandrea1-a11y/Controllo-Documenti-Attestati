@@ -1,449 +1,259 @@
-import os
-import re
-import json
-import sqlite3
-import datetime
-import io
 import streamlit as st
+import sqlite3
+import os
+import io
+import base64
+import json
+from datetime import datetime
+import pypdfium2 as pdfium
 from groq import Groq
-import dropbox
-import pypdf
 
-# ==========================================
-# 1. CONFIGURAZIONE E INIZIALIZZAZIONE DB
-# ==========================================
-DB_FILE = "gestionale_cantieri.db"
+# Configurazione della pagina Streamlit
+st.set_page_config(
+    page_title="Dashboard Sicurezza CSE",
+    page_icon="🛡️",
+    layout="wide"
+)
 
-GROQ_API_KEY = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
-DROPBOX_TOKEN = st.secrets.get("DROPBOX_TOKEN", os.environ.get("DROPBOX_TOKEN", ""))
+# Inizializzazione client Groq (assicurati di avere la chiave nei Secrets di Streamlit o variabile d'ambiente)
+# Se non è impostata, legge da st.secrets
+groq_api_key = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY", ""))
+client = Groq(api_key=groq_api_key)
 
-client_groq = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-
-def get_db_connection():
-    return sqlite3.connect(DB_FILE)
+# ---------------------------------------------------------
+# DATABASE SETUP
+# ---------------------------------------------------------
+DB_NAME = "database_sicurezza.db"
 
 def init_db():
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS aziende (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nome TEXT UNIQUE NOT NULL,
-                percorso_dropbox TEXT
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS lavoratori (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                azienda_id INTEGER,
-                nominativo TEXT NOT NULL,
-                mansione TEXT,
-                stato_scadenza_totale TEXT DEFAULT '🔴 Da Verificare',
-                prescrizioni_mediche TEXT DEFAULT 'Nessuna prescrizione rilevata',
-                FOREIGN KEY (azienda_id) REFERENCES aziende (id) ON DELETE CASCADE
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS documenti_lavoratori (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                lavoratore_id INTEGER,
-                tipo_documento TEXT NOT NULL,
-                stato_scadenza TEXT DEFAULT '🔴 Scaduto / Assente',
-                data_scadenza TEXT,
-                nome_file_origine TEXT,
-                FOREIGN KEY (lavoratore_id) REFERENCES lavoratori (id) ON DELETE CASCADE
-            )
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS file_processati (
-                path_univoco TEXT PRIMARY KEY
-            )
-        """)
-        conn.commit()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS lavoratori (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT NOT NULL,
+            cognome TEXT NOT NULL,
+            codice_fiscale TEXT UNIQUE,
+            mansione TEXT,
+            stato TEXT
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS certificati (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lavoratore_id INTEGER,
+            nome_corso TEXT,
+            data_emissione TEXT,
+            data_scadenza TEXT,
+            file_name TEXT,
+            FOREIGN KEY (lavoratore_id) REFERENCES lavoratori(id)
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
 init_db()
 
-# ==========================================
-# 2. FUNZIONI UTILI & DROPBOX
-# ==========================================
-def pulisci_percorso_dropbox(link_raw):
-    if not link_raw:
-        return ""
-    path = link_raw.strip()
-    path = re.sub(r"^https?://(www\.)?dropbox\.com/home", "", path)
-    path = re.sub(r"\?quickview=.*$", "", path)
-    path = re.sub(r"\?dl=.*$", "", path)
-    path = path.replace("%20", " ")
-    if path and not path.startswith("/"):
-        path = "/" + path
-    return path.rstrip("/")
-
-def get_dropbox_client():
-    if DROPBOX_TOKEN:
-        return dropbox.Dropbox(DROPBOX_TOKEN)
-    return None
-
-def upload_db_to_dropbox():
-    dbx = get_dropbox_client()
-    if dbx and os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "rb") as f:
-                dbx.files_upload(f.read(), f"/{DB_FILE}", mode=dropbox.files.WriteMode.overwrite)
-        except Exception:
-            pass
-
-def file_gia_processato(path_univoco):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM file_processati WHERE path_univoco = ?", (path_univoco,))
-        return cursor.fetchone() is not None
-
-def registra_file_processato(path_univoco):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO file_processati (path_univoco) VALUES (?)", (path_univoco,))
-        conn.commit()
-
-def pulisci_nome_rigido(nome_raw):
-    if not nome_raw or str(nome_raw).lower() in ["null", "none", "sconosciuto", ""]:
-        return "SCONOSCIUTO"
-    nome_pulisce = re.sub(r'[^a-zA-ZàèéìòùÁÉÍÓÚàèéìòù\s\'-]', '', str(nome_raw))
-    parti = [p.capitalize() for p in nome_pulisce.split() if len(p) > 1]
-    return " ".join(parti) if parti else "SCONOSCIUTO"
-
-def estrai_testo_da_pdf_bytes(file_bytes):
-    """Estrae in modo pulito e sicuro il testo da tutte le pagine del PDF."""
-    testo_totale = ""
+# ---------------------------------------------------------
+# FUNZIONI DI ESTRAZIONE PDF (MULTIPAGINA)
+# ---------------------------------------------------------
+def estrai_pagine_da_pdf(file_bytes):
+    """Estrae il testo e l'immagine pagina per pagina da un PDF multipagina."""
+    pagine_estratte = []
     try:
-        reader = pypdf.PdfReader(io.BytesIO(file_bytes))
-        for idx, page in enumerate(reader.pages):
-            testo_pagina = page.extract_text()
-            if testo_pagina:
-                testo_totale += f"\n--- PAGINA {idx + 1} ---\n" + testo_pagina
-    except Exception as e:
-        st.error(f"Errore nella lettura delle pagine del PDF: {e}")
-    return testo_totale
-
-# ==========================================
-# 3. CALCOLO STATI E DATE
-# ==========================================
-def calcola_stato_e_data_python(data_scad_str, data_emiss_str, anni_val):
-    oggi = datetime.date.today()
-    data_finale = None
-
-    if data_scad_str and data_scad_str != "NON_PRESENTI":
-        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
-            try:
-                data_finale = datetime.datetime.strptime(data_scad_str.strip(), fmt).date()
-                break
-            except ValueError:
-                pass
-
-    if not data_finale and data_emiss_str and data_emiss_str != "NON_PRESENTI" and anni_val:
-        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
-            try:
-                dt_em = datetime.datetime.strptime(data_emiss_str.strip(), fmt).date()
-                try:
-                    data_finale = dt_em.replace(year=dt_em.year + int(anni_val))
-                except ValueError:
-                    data_finale = dt_em + datetime.timedelta(days=365 * int(anni_val))
-                break
-            except ValueError:
-                pass
-
-    if not data_finale:
-        return "🔴 Scaduto / Assente", "Non indicata"
-
-    diff_giorni = (data_finale - oggi).days
-    str_data = data_finale.strftime("%d/%m/%Y")
-
-    if diff_giorni < 0:
-        return "🔴 Scaduto", str_data
-    elif diff_giorni <= 60:
-        return "🟡 In Scadenza", str_data
-    else:
-        return "🟢 Valido", str_data
-
-def aggiorna_stato_generale_lavoratore(lavoratore_id):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (lavoratore_id,))
-        stati = [r[0] for r in cursor.fetchall()]
-        
-        if not stati:
-            stato_tot = "🔴 Nessun Documento"
-        elif any("🔴" in s for s in stati):
-            stato_tot = "🔴 Documenti Scaduti/Mancanti"
-        elif any("🟡" in s for s in stati):
-            stato_tot = "🟡 Documenti in Scadenza"
-        else:
-            stato_tot = "🟢 In Regola"
+        pdf = pdfium.PdfDocument(file_bytes)
+        for i, page in enumerate(pdf):
+            textpage = page.get_textpage()
+            testo_pagina = textpage.get_text_range().strip()
             
-        cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (stato_tot, lavoratore_id))
-        conn.commit()
+            img_base64 = None
+            # Se il testo è troppo corto (es. PDF scannerizzato), estraiamo l'immagine di QUELLA pagina
+            if len(testo_pagina) < 30:
+                try:
+                    image = page.render(scale=2).to_pil()
+                    buffered = io.BytesIO()
+                    image.save(buffered, format="JPEG")
+                    img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                except Exception:
+                    pass
+            
+            pagine_estratte.append({
+                "numero_pagina": i + 1,
+                "testo": testo_pagina,
+                "immagine": img_base64
+            })
+    except Exception as e:
+        st.error(f"Errore nella lettura del PDF: {e}")
+        
+    return pagine_estratte
 
-# ==========================================
-# 4. ANALISI MULTI-DOCUMENTO CON GROQ AI
-# ==========================================
-def elabora_singolo_documento_con_ai(file_bytes, nome_file, azienda_selezionata, path_univoco):
-    if file_gia_processato(path_univoco):
-        return f"File già elaborato: {nome_file}", True
+# ---------------------------------------------------------
+# INTERAZIONE CON GROQ AI
+# ---------------------------------------------------------
+def analizza_contenuto_con_ai(testo, immagine_base64=None):
+    """Invia il testo o l'immagine della pagina a Groq per estrarre i dati del certificato."""
+    prompt = """
+    Analizza il documento di sicurezza allegato ed estrai le seguenti informazioni in formato JSON puro:
+    - nome (Nome del lavoratore)
+    - cognome (Cognome del lavoratore)
+    - codice_fiscale (Codice fiscale del lavoratore, se presente)
+    - mansione (Mansione o ruolo, se presente)
+    - nome_corso (Titolo specifico del corso di formazione, es. 'RSPP', 'Muletto', 'Spazi Confinati', ecc.)
+    - data_emissione (Data di emissione nel formato YYYY-MM-DD, se presente)
+    - data_scadenza (Data di scadenza nel formato YYYY-MM-DD, se presente)
 
-    # Estrazione testo reale multipagina via pypdf
-    testo_pdf = estrai_testo_da_pdf_bytes(file_bytes)
-    if not testo_pdf.strip():
-        registra_file_processato(path_univoco)
-        return f"Impossibile leggere il testo da {nome_file} (potrebbe essere una scansione immagine senza testo).", False
-
-    if not client_groq:
-        return "Chiave API Groq non trovata.", False
-
-    system_prompt = """
-Sei un esperto verificatore di documenti di cantiere e sicurezza sul lavoro (CSE).
-Analizza il testo estratto da questo file PDF multipagina appartenente a un singolo lavoratore.
-
-ATTENZIONE: Il file contiene PIÙ documenti o attestati differenti (es. Idoneità Sanitaria, Formazione Generale, Formazione Specifica, Antincendio, Primo Soccorso, Unilav, Tesserino, ecc.).
-Estrai TUTTI i singoli documenti/attestati trovati nel testo e le eventuali prescrizioni mediche.
-
-Restituisci ESCLUSIVAMENTE un JSON valido con questa struttura esatta:
-{
-    "lavoratore": "NOME COGNOME",
-    "mansione": "Manovale/Carpentiere/ecc",
-    "prescrizione_medica": "Eventuali prescrizioni sanitarie oppure 'Nessuna prescrizione rilevata'",
-    "documenti": [
-        {
-            "documento_nome": "Nome Specifico dell'attestato o corso (es. Idoneità Sanitaria, Corso Antincendio)",
-            "data_emissione": "GG/MM/AAAA oppure NON_PRESENTI",
-            "data_scadenza": "GG/MM/AAAA oppure NON_PRESENTI",
-            "anni_validita": 5
-        }
-    ]
-}
-"""
+    Rispondi SOLO con un oggetto JSON valido, senza markdown o commenti aggiuntivi. Se un campo non è presente, metti null.
+    """
+    
+    messages = []
+    if immagine_base64:
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{immagine_base64}"
+                    }
+                }
+            ]
+        })
+        model_to_use = "llama-3.2-11b-vision-preview"
+    else:
+        messages.append({
+            "role": "user",
+            "content": f"{prompt}\n\nTesto del documento:\n{testo}"
+        })
+        model_to_use = "llama-3.1-8b-instant"
 
     try:
-        response = client_groq.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Nome File: {nome_file}\n\nTesto Completo del PDF:\n{testo_pdf[:15000]}"}
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1
+        completion = client.chat.completions.create(
+            model=model_to_use,
+            messages=messages,
+            temperature=0.1,
+            response_format={"type": "json_object"}
         )
-
-        dati_ai = json.loads(response.choices[0].message.content)
-
-        nom_lav = pulisci_nome_rigido(dati_ai.get("lavoratore"))
-        if nom_lav == "SCONOSCIUTO":
-            registra_file_processato(path_univoco)
-            return f"Lavoratore non identificato in {nome_file}", False
-
-        mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
-        prescr_raw = dati_ai.get("prescrizione_medica")
-        prescr = prescr_raw.strip() if (prescr_raw and str(prescr_raw).lower() != "null") else 'Nessuna prescrizione rilevata'
-
-        lista_documenti = dati_ai.get("documenti", [])
-        if not lista_documenti:
-            registra_file_processato(path_univoco)
-            return f"Nessun documento strutturato trovato in {nome_file}", False
-
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
-            az_row = cursor.fetchone()
-            if not az_row:
-                return f"Azienda {azienda_selezionata} non trovata.", False
-            az_id = az_row[0]
-
-            cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND UPPER(nominativo) = ?", (az_id, nom_lav.upper()))
-            operaio_db = cursor.fetchone()
-
-            if operaio_db:
-                op_id = operaio_db[0]
-                if prescr != 'Nessuna prescrizione rilevata':
-                    cursor.execute("UPDATE lavoratori SET prescrizioni_mediche = ? WHERE id = ?", (prescr, op_id))
-            else:
-                cursor.execute("""
-                    INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche)
-                    VALUES (?, ?, ?, '🔴 Da Verificare', ?)
-                """, (az_id, nom_lav, mans_lav, prescr))
-                op_id = cursor.lastrowid
-
-            # Inseriamo uno a uno tutti gli attestati trovati nel faldone
-            count_inseriti = 0
-            for doc_item in lista_documenti:
-                doc_nome = (doc_item.get("documento_nome") or "Attestato Generico").strip()
-                data_em = doc_item.get("data_emissione", "NON_PRESENTI")
-                data_scad, stato_calc = calcola_stato_e_data_python(
-                    doc_item.get("data_scadenza"),
-                    data_em,
-                    doc_item.get("anni_validita")
-                )
-
-                cursor.execute("""
-                    SELECT id FROM documenti_lavoratori 
-                    WHERE lavoratore_id = ? AND nome_file_origine = ? AND tipo_documento = ?
-                """, (op_id, nome_file, doc_nome))
-                
-                doc_esistente = cursor.fetchone()
-
-                if doc_esistente:
-                    cursor.execute("""
-                        UPDATE documenti_lavoratori 
-                        SET stato_scadenza = ?, data_scadenza = ?
-                        WHERE id = ?
-                    """, (stato_calc, data_scad, doc_esistente[0]))
-                else:
-                    cursor.execute("""
-                        INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza, nome_file_origine)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (op_id, doc_nome, stato_calc, data_scad, nome_file))
-                count_inseriti += 1
-
-            conn.commit()
-
-        aggiorna_stato_generale_lavoratore(op_id)
-        registra_file_processato(path_univoco)
-        upload_db_to_dropbox()
-        return f"✨ Estratti {count_inseriti} attestati per {nom_lav} da {nome_file}", True
-
+        return json.loads(completion.choices[0].message.content)
     except Exception as e:
-        return f"Errore nell'analisi del file {nome_file}: {e}", False
+        st.error(f"Errore durante la chiamata a Groq AI: {e}")
+        return None
 
-# ==========================================
-# 5. INTERFACCIA UTENTE STREAMLIT
-# ==========================================
-st.set_page_config(page_title="Gestione Cantiere CSE", layout="wide", page_icon="🏗️")
-st.title("🏗️ Monitoraggio IDONEITÀ E ATTESTATI CANTIERE")
+# ---------------------------------------------------------
+# LOGICA DI SALVATAGGIO NEL DATABASE
+# ---------------------------------------------------------
+def salva_dati_estratti(dati, nome_file):
+    if not dati or not dati.get("nome") or not dati.get("cognome"):
+        return False
 
-with st.sidebar:
-    st.header("⚙️ Configurazione Ditte e Dropbox")
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
     
-    with st.expander("🏢 Aggiungi / Aggiorna Ditta", expanded=False):
-        nuova_azienda = st.text_input("Nome Impresa / Ditta")
-        link_dbx = st.text_input("Link o Percorso Cartella Dropbox")
-        if st.button("💾 Salva Azienda"):
-            if nuova_azienda:
-                percorso_clean = pulisci_percorso_dropbox(link_dbx)
-                with get_db_connection() as conn:
-                    cursor = conn.cursor()
-                    cursor.execute("""
-                        INSERT INTO aziende (nome, percorso_dropbox) VALUES (?, ?)
-                        ON CONFLICT(nome) DO UPDATE SET percorso_dropbox=excluded.percorso_dropbox
-                    """, (nuova_azienda.strip(), percorso_clean))
-                    conn.commit()
-                st.success(f"Ditta '{nuova_azienda}' salvata!")
-                st.rerun()
-
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, nome, percorso_dropbox FROM aziende")
-        aziende_list = cursor.fetchall()
-
-    nomi_aziende = [a[1] for a in aziende_list]
-    if nomi_aziende:
-        azienda_selezionata = st.selectbox("Seleziona Impresa", nomi_aziende)
-        az_info = next((a for a in aziende_list if a[1] == azienda_selezionata), None)
-        percorso_az = az_info[2] if az_info else ""
-        if percorso_az:
-            st.caption(f"📁 Percorso Dropbox: `{percorso_az}`")
+    cf = dati.get("codice_fiscale")
+    # Cerca lavoratore esistente per CF o per Nome e Cognome
+    if cf:
+        cursor.execute("SELECT id FROM lavoratori WHERE codice_fiscale = ?", (cf,))
     else:
-        azienda_selezionata = None
-        st.warning("Inserisci prima un'azienda.")
-
-    st.markdown("---")
+        cursor.execute("SELECT id FROM lavoratori WHERE nome = ? AND cognome = ?", (dati.get("nome"), dati.get("cognome")))
     
-    if azienda_selezionata:
-        st.subheader("📤 Upload Manuale")
-        uploaded_files = st.file_uploader("Carica file PDF", type=["pdf"], accept_multiple_files=True)
-        if uploaded_files and st.button("🚀 Elabora File Caricati"):
-            for f in uploaded_files:
-                bytes_data = f.read()
-                msg, ok = elabora_singolo_documento_con_ai(bytes_data, f.name, azienda_selezionata, f"manual_{f.name}")
-                if ok:
-                    st.success(msg)
+    row = cursor.fetchone()
+    
+    if row:
+        lavoratore_id = row[0]
+    else:
+        cursor.execute('''
+            INSERT INTO lavoratori (nome, cognome, codice_fiscale, mansione, stato)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (dati.get("nome"), dati.get("cognome"), cf, dati.get("mansione"), "ABILITATO"))
+        lavoratore_id = cursor.lastrowid
+
+    # Inserisci il certificato associato
+    cursor.execute('''
+        INSERT INTO certificati (lavoratore_id, nome_corso, data_emissione, data_scadenza, file_name)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (
+        lavoratore_id, 
+        dati.get("nome_corso", "Corso Generico"), 
+        dati.get("data_emissione"), 
+        dati.get("data_scadenza"), 
+        nome_file
+    ))
+    
+    conn.commit()
+    conn.close()
+    return True
+
+# ---------------------------------------------------------
+# INTERFACCIA UTENTE STREAMLIT
+# ---------------------------------------------------------
+st.title("🛡️ Dashboard Sicurezza CSE - Gestione Attestati")
+st.write("Carica i PDF riepiloghi o singoli attestati dei lavoratori. Il sistema leggerà **ogni singola pagina** autonomamente.")
+
+menu = st.sidebar.selectbox("Navigazione", ["Carica Documenti", "Elenco Lavoratori & Stato"])
+
+if menu == "Carica Documenti":
+    st.subheader("📤 Caricamento e Analisi IA Multipagina")
+    
+    uploaded_files = st.file_uploader("Seleziona file PDF o immagini", type=["pdf", "png", "jpg", "jpeg"], accept_multiple_files=True)
+    
+    if uploaded_files and st.button("Avvia Analisi e Importazione"):
+        for uploaded_file in uploaded_files:
+            file_bytes = uploaded_file.read()
+            nome_basso = uploaded_file.name.lower()
+            
+            with st.spinner(f"Elaborazione in corso per: {uploaded_file.name}..."):
+                if nome_basso.endswith(".pdf"):
+                    pagine = estrai_pagine_da_pdf(file_bytes)
+                    
+                    for pag in pagine:
+                        testo = pag["testo"]
+                        img = pag["immagine"]
+                        num_pag = pag["numero_pagina"]
+                        
+                        if not testo and not img:
+                            continue
+                            
+                        dati_ai = analizza_contenuto_con_ai(testo, img)
+                        if dati_ai:
+                            nome_file_pagina = f"{uploaded_file.name} (Pag. {num_pag})"
+                            salva_dati_estratti(dati_ai, nome_file_pagina)
+                            
+                    st.success(f"Completato file multipagina: {uploaded_file.name}")
+                    
                 else:
-                    st.warning(msg)
-            st.rerun()
+                    # Gestione immagini singole (png, jpg)
+                    img_base64 = base64.b64encode(file_bytes).decode('utf-8')
+                    dati_ai = analizza_contenuto_con_ai("", img_base64)
+                    if dati_ai:
+                        salva_dati_estratti(dati_ai, uploaded_file.name)
+                    st.success(f"Completato file: {uploaded_file.name}")
+                    
+        st.balloons()
+        st.info("Tutti i documenti sono stati elaborati e salvati nel database!")
 
-    st.markdown("---")
-    if azienda_selezionata and percorso_az:
-        if st.button("🚀 SCANSIONA / RIPRENDI SCANSIONE"):
-            dbx = get_dropbox_client()
-            if not dbx:
-                st.error("Token Dropbox non configurato!")
-            else:
-                with st.spinner("Scansione in corso..."):
-                    try:
-                        res = dbx.files_list_folder(percorso_az, recursive=True)
-                        files_to_process = [entry for entry in res.entries if isinstance(entry, dropbox.files.FileMetadata) and entry.name.lower().endswith(".pdf")]
-                        
-                        num_f = len(files_to_process)
-                        st.info(f"Trovati {num_f} PDF.")
-                        
-                        prog_bar = st.progress(0)
-                        for idx, f_meta in enumerate(files_to_process):
-                            _, response = dbx.files_download(f_meta.path_lower)
-                            msg, ok = elabora_singolo_documento_con_ai(response.content, f_meta.name, azienda_selezionata, f_meta.path_lower)
-                            prog_bar.progress((idx + 1) / num_f)
-                        st.success("Scansione completata!")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Errore scansione: {e}")
-
-# DASHBOARD
-if azienda_selezionata:
-    st.subheader(f"👥 Elenco Lavoratori - Impresa: {azienda_selezionata}")
-
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
-        az_id = cursor.fetchone()[0]
-
-        cursor.execute("""
-            SELECT id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche 
-            FROM lavoratori WHERE azienda_id = ? ORDER BY nominativo ASC
-        """, (az_id,))
-        lavoratori = cursor.fetchall()
-
+elif menu == "Elenco Lavoratori & Stato":
+    st.subheader("👥 Gestione Lavoratori e Certificati")
+    
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, nome, cognome, codice_fiscale, mansione, stato FROM lavoratori")
+    lavoratori = cursor.fetchall()
+    
     if not lavoratori:
-        st.info("Nessun lavoratore presente.")
+        st.warning("Nessun lavoratore presente nel database. Inizia caricando dei documenti.")
     else:
         for lav in lavoratori:
-            lav_id, nom, mans, stato_tot, prescr = lav
-            
-            with get_db_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT id, tipo_documento, stato_scadenza, data_scadenza, nome_file_origine 
-                    FROM documenti_lavoratori WHERE lavoratore_id = ?
-                """, (lav_id,))
-                docs = cursor.fetchall()
-
-            expander_title = f"{stato_tot} — 👤 {nom} ({mans}) — [{len(docs)} attestati registrati]"
-            
-            with st.expander(expander_title, expanded=False):
-                if prescr and prescr != 'Nessuna prescrizione rilevata':
-                    st.warning(f"⚠️ **Prescrizioni Sanitarie:** {prescr}")
-
-                if docs:
-                    table_data = []
-                    for d in docs:
-                        doc_id, t_doc, st_scad, d_scad, f_orig = d
-                        table_data.append({
-                            "Attestato / Visita Rilevata": t_doc,
-                            "Validità AI": st_scad,
-                            "Scadenza Calcolata": d_scad,
-                            "File Origine": f_orig
-                        })
-                    st.dataframe(table_data, use_container_width=True)
+            lav_id, nome, cognome, cf, mansione, stato = lav
+            with st.expander(f"{cognome} {nome} - Mansione: {mansione or 'ND'} (CF: {cf or 'ND'})"):
+                cursor.execute("SELECT id, nome_corso, data_emissione, data_scadenza, file_name FROM certificati WHERE lavoratore_id = ?", (lav_id,))
+                certificati = cursor.fetchall()
+                
+                if certificati:
+                    st.markdown("**Certificati Associati:**")
+                    for cert in certificati:
+                        c_id, corso, emissione, scadenza, f_name = cert
+                        st.write(f"- **{corso}** | Emesso: {emissione or 'ND'} | Scadenza: {scadenza or 'ND'} | *File: {f_name}*")
                 else:
-                    st.write("Nessun documento registrato.")
-
-                if st.button(f"🗑️ Rimuovi Questo Lavoratore", key=f"del_{lav_id}"):
-                    with get_db_connection() as conn:
-                        cursor = conn.cursor()
-                        cursor.execute("DELETE FROM lavoratori WHERE id = ?", (lav_id,))
-                        conn.commit()
-                    st.rerun()
+                    st.info("Nessun certificato registrato per questo lavoratore.")
+                    
+    conn.close()
