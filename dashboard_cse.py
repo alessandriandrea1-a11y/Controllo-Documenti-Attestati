@@ -256,7 +256,6 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
 def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
     nome_lower = nome_file.lower()
     
-    # 🚫 FILTRO RAPIDO ANTI-POS / FATTURE / DOCUMENTI GENERALI DA SCARTARE SUBITO
     parole_da_scartare = ["pos", "p.o.s", "piano operativo", "fattura", "fatture", "preventivo", "ordine", "ddt", "bolla", "contabilita", "estratto", "pagamento", "acconto", "saldo", "banca", "bonifico", "contratto", "computo"]
     if any(p in nome_lower for p in parole_da_scartare):
         return False
@@ -489,15 +488,16 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
                     cursor.execute("INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche) VALUES (?, ?, ?, '🔴 Da Verificare', ?)", (az_id, nom_lav, mans_lav, prescr))
                     op_id = cursor.lastrowid
                 
-                cursor.execute("SELECT id FROM documenti_lavoratori WHERE lavoratore_id = ? AND nome_file_origine = ?", (op_id, nome_file))
+                # MODIFICA CHIAVE: Controlla se esiste già un documento dello STESSO TIPO per lo stesso lavoratore
+                cursor.execute("SELECT id FROM documenti_lavoratori WHERE lavoratore_id = ? AND UPPER(tipo_documento) = ?", (op_id, doc_nome.upper()))
                 doc_esistente = cursor.fetchone()
                 
                 if doc_esistente:
                     cursor.execute("""
                         UPDATE documenti_lavoratori 
-                        SET tipo_documento = ?, stato_scadenza = ?, data_scadenza = ?
+                        SET stato_scadenza = ?, data_scadenza = ?, nome_file_origine = ?
                         WHERE id = ?
-                    """, (doc_nome, stato_calc, data_scad, doc_esistente[0]))
+                    """, (stato_calc, data_scad, nome_file, doc_esistente[0]))
                     msg_esito = f"🔄 Aggiornato: {doc_nome} ({nom_lav})"
                 else:
                     cursor.execute("""
@@ -631,7 +631,6 @@ if azienda_selezionata:
             if percorso_dropbox_ditta:
                 st.caption(f"Cartella base ditta: `{percorso_dropbox_ditta}`")
             
-            # Campo opzionale per puntare solo a una sottocartella specifica (es. /DittaX/Nuovi_Aggiornamenti)
             sottocartella_specifica = st.text_input(
                 "Sottocartella specifica (opzionale):", 
                 value="", 
