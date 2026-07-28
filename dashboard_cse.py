@@ -209,11 +209,9 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
     
     doc_lower = (tipo_documento or "").lower()
     
-    # 1. GESTIONE DOCUMENTI SENZA SCADENZA (Tesserino, Consegna DPI, ecc.)
     is_senza_scadenza = any(termine in doc_lower for termine in ["tesserino", "badge", "riconoscimento", "dpi", "consegna", "dispositivi"])
     
     if is_senza_scadenza:
-        # Per questi documenti l'importante è che ci sia la data di emissione/consegna
         data_rif = data_emissione_str if (data_emissione_str and data_emissione_str != "NON_PRESENTI") else "Presente"
         for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
             try:
@@ -256,6 +254,48 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
     else:
         return data_formattata, "🟢 In Regola"
 
+def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
+    """
+    Filtro preliminare intelligente: 
+    1. Controlla il nome del file per escludere fatture o documenti commerciali evidenti.
+    2. Esegue una micro-analisi nel testo interno estratto per cercare parole chiave di sicurezza/attestati.
+    """
+    nome_lower = nome_file.lower()
+    
+    # Se il nome contiene termini palesemente commerciali ed estranei alla sicurezza
+    parole_escluse_nome = ["fattura", "fatture", "preventivo", "ordine", "ddt", "bolla", "contabilita", "estratto", "pagamento", "acconto", "saldo", "banca", "bonifico"]
+    if any(p in nome_lower for p in parole_escluse_nome):
+        # Doppio controllo di sicurezza: se nel testo interno ci fosse per assurdo un attestato, diamo comunque la precedenza al testo, altrimenti scartiamo
+        testo_check = (testo_estratto or "").lower()
+        if not any(k in testo_check for k in ["attestato", "formazione", "corso sicurezza", "idoneità sanitaria", "visita medica"]):
+            return False
+
+    # Elenco completo di parole chiave relative alla sicurezza sul lavoro e visite mediche
+    parole_chiave_sicurezza = [
+        "attestato", "formazione", "corso", "sicurezza", "patentino", "idoneità", "idoneita", 
+        "visita", "medica", "medico", "lavoratore", "preposto", "dirigente", "antincendio", 
+        "primo soccorso", "spazi confinati", "ple", "gru", "muletto", "carrello", "imbracatore", 
+        "dpi", "consegna", "tesserino", "badge", "riconoscimento", "asl", "ispettorato", 
+        "dlgs 81", "formazione lavoratori", "formazione accordo stato regioni", "sorveglianza sanitaria"
+    ]
+    
+    # 1. Verifica se il nome del file contiene almeno una parola chiave di sicurezza
+    if any(p in nome_lower for p in parole_chiave_sicurezza):
+        return True
+        
+    # 2. MICRO-CONTROLLO INTERNO NEL TESTO: analizziamo il testo estratto (es. la prima pagina)
+    testo_lower = (testo_estratto or "").lower()
+    
+    # Contiamo quante parole chiave di sicurezza compaiono nel testo del documento
+    match_testo = sum(1 for p in parole_chiave_sicurezza if p in testo_lower)
+    
+    # Se nel documento compaiono almeno 2 riscontri di sicurezza, il file è pertinente (es. un PDF scansionato o nominato con codice)
+    if match_testo >= 2:
+        return True
+        
+    # Se non c'è alcun riscontro né nel nome né dentro il testo, lo scartiamo per non sprecare token
+    return False
+
 def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client, azienda_selezionata):
     nome_lower = nome_file.lower()
     
@@ -295,7 +335,14 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
     if nome_lower.endswith(".pdf"):
         pagine = estrai_pagine_da_pdf(file_bytes)
         messaggi_esito = []
-        ultimo_stopped = False
+        
+        # Uniamo il testo di tutte le pagine per effettuare la micro-verificata interna preliminare
+        testo_totale_pdf = " ".join([p["testo"] for p in pagine])
+        
+        # CONTROLLO DI PERTINENZA INTEGRATO (Nome + Testo Interno)
+        if not e_documento_sicurezza_pertinente(nome_file, testo_totale_pdf):
+            registra_file_processato(path_univoco)
+            return None # Scartato silenziosamente perché privo di contenuti di sicurezza
         
         for pag in pagine:
             testo_estratto = pag["testo"]
@@ -328,14 +375,19 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
         registra_file_processato(path_univoco)
         if messaggi_esito:
             return " | ".join(messaggi_esito), False
-        return "Nessun dato utile estratto dal PDF", False
+        return None
 
     else:
+        # DOCX singolo
         testo_estratto = ""
         try:
             testo_estratto = docx2txt.process(io.BytesIO(file_bytes))
         except Exception:
             testo_estratto = ""
+            
+        if not e_documento_sicurezza_pertinente(nome_file, testo_estratto):
+            registra_file_processato(path_univoco)
+            return None
             
         esito, stopped = _esegui_chiamata_ai_e_salvataggio(
             testo_estratto=testo_estratto,
@@ -408,12 +460,12 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
 
         if not dati_ai.get("documento_pertinente", True):
             registra_file_processato(path_univoco)
-            return "Documento non individuale ignorato", False
+            return None
 
         nom_lav = pulisci_nome_rigido(dati_ai.get("lavoratore"))
         if nom_lav == "SCONOSCIUTO":
             registra_file_processato(path_univoco)
-            return "Nome lavoratore non trovato", False
+            return None
 
         mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
         doc_nome = (dati_ai.get("documento_nome") or "Attestato Generico").strip()
@@ -593,12 +645,13 @@ if azienda_selezionata:
                     elif not api_key_inserita:
                         st.error("🚨 Inserisci la chiave Groq API a sinistra!")
                     else:
-                        with st.spinner("📦 Scansione in corso..."):
+                        with st.spinner("📦 Scansione in corso (con micro-controllo interno e filtro pertinenza)..."):
                             client = Groq(api_key=api_key_inserita)
                             try:
                                 res = dbx.files_list_folder(percorso_dropbox_ditta, recursive=True)
                                 file_list = res.entries
                                 processed = 0
+                                scartati = 0
                                 bloccato_per_limit = False
                                 
                                 for entry in file_list:
@@ -609,7 +662,7 @@ if azienda_selezionata:
                                             if e_file_gia_processato(path_univoco):
                                                 continue
                                                 
-                                            st.write(f"🔄 Lettura nuovo documento: `{entry.name}`...")
+                                            st.write(f"🔍 Micro-controllo file: `{entry.name}`...")
                                             _, file_res = dbx.files_download(entry.path_lower)
                                             f_bytes = file_res.content
                                             
@@ -629,12 +682,14 @@ if azienda_selezionata:
                                             if msg:
                                                 st.info(f"➡️ {msg}")
                                                 processed += 1
-                                            time.sleep(0.5)
+                                            else:
+                                                scartati += 1
+                                            time.sleep(0.2)
                                 
                                 if bloccato_per_limit:
                                     st.warning("⚠️ **Scansione messa in pausa.** Token Groq terminati. Inserisci una nuova API Key a sinistra o attendi il reset, poi premi **'🚀 RIPRENDI SCANSIONE'**.")
                                 else:
-                                    st.success(f"✅ Scansione completata! Elaborati {processed} nuovi file.")
+                                    st.success(f"✅ Scansione completata! Elaborati {processed} file pertinenti. Scartati automaticamente {scartati} file non inerenti.")
                                 
                                 st.rerun()
                             except Exception as ex_dbx:
@@ -654,8 +709,10 @@ if azienda_selezionata:
                 st.session_state["uploader_key"] += 1
                 if stopped:
                     st.error(esito)
-                else:
+                elif esito:
                     st.success(f"🎉 Risultato: {esito}")
+                else:
+                    st.warning("⚠️ Il file è stato scartato perché non è stato riconosciuto come documento di sicurezza/attestato.")
                 st.rerun()
 
     # --- TABELLA LAVORATORI ---
