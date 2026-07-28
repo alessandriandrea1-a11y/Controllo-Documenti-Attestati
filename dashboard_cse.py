@@ -1,35 +1,35 @@
-import streamlit as st
-import pandas as pd
-import sqlite3
-import json
-import io
-import os
-import zipfile
-import dropbox
-import docx2txt
-import re
-import requests
-from datetime import datetime, timedelta
-import zoneinfo
 import base64
+from datetime import datetime
+import io
+import json
+import os
+import re
+import sqlite3
+import time
+import zipfile
+import zoneinfo
+
+import docx2txt
+import dropbox
 from groq import Groq
+import pandas as pd
 import pypdfium2 as pdfium
+import requests
+import streamlit as st
 
 st.set_page_config(layout="wide", page_title="Dashboard CSE — Controllo Totale Diretto")
 
 # --- CONFIGURAZIONE DROPBOX E DATABASE ---
 DB_FILE_NAME = "database_sicurezza.db"
 
-DROPBOX_APP_KEY = st.secrets.get("DROPBOX_APP_KEY", "lz3k1850lvdbpe2")
-DROPBOX_APP_SECRET = st.secrets.get("DROPBOX_APP_SECRET", "jcqww6ots1z1r9t")
-DROPBOX_REFRESH_TOKEN = st.secrets.get("DROPBOX_REFRESH_TOKEN", "")
-
 def get_dropbox_client():
-    refresh_token = st.secrets.get("DROPBOX_REFRESH_TOKEN", DROPBOX_REFRESH_TOKEN)
-    app_key = st.secrets.get("DROPBOX_APP_KEY", DROPBOX_APP_KEY)
-    app_secret = st.secrets.get("DROPBOX_APP_SECRET", DROPBOX_APP_SECRET)
-    
-    if refresh_token:
+    """Recupera il client Dropbox utilizzando esclusivamente i Secrets di Streamlit."""
+    refresh_token = st.secrets.get("DROPBOX_REFRESH_TOKEN", "")
+    app_key = st.secrets.get("DROPBOX_APP_KEY", "")
+    app_secret = st.secrets.get("DROPBOX_APP_SECRET", "")
+    token = st.secrets.get("DROPBOX_TOKEN", "")
+
+    if refresh_token and app_key and app_secret:
         try:
             return dropbox.Dropbox(
                 app_key=app_key,
@@ -38,14 +38,13 @@ def get_dropbox_client():
             )
         except Exception as e:
             st.error(f"⚠️ Errore connessione Refresh Token Dropbox: {e}")
-            
-    token = st.secrets.get("DROPBOX_TOKEN", "")
+
     if token:
         try:
             return dropbox.Dropbox(token)
         except Exception as e:
             st.error(f"⚠️ Errore connessione Token Dropbox: {e}")
-            
+
     return None
 
 def download_db_from_dropbox():
@@ -67,54 +66,58 @@ def upload_db_to_dropbox():
         except Exception as e:
             st.error(f"⚠️ Errore nel salvataggio su Dropbox: {e}")
 
+# Scarica il DB all'avvio se presente su Dropbox
 download_db_from_dropbox()
 
-# --- DATABASE LOCAL SQLITE E CREAZIONE TABELLE ---
-conn = sqlite3.connect(DB_FILE_NAME, check_same_thread=False, timeout=20)
-cursor = conn.cursor()
+# --- GESTIONE DB SAFE PER THREAD ---
+def get_db_connection():
+    """Crea una nuova connessione SQLite isolata per il thread corrente."""
+    return sqlite3.connect(DB_FILE_NAME, timeout=20)
 
 def inizializza_db():
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS aziende (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        nome TEXT UNIQUE,
-        percorso_dropbox TEXT DEFAULT ''
-    )
-    """)
-    
-    cursor.execute("PRAGMA table_info(aziende)")
-    colonne = [riga[1] for riga in cursor.fetchall()]
-    if "percorso_dropbox" not in colonne:
-        try:
-            cursor.execute("ALTER TABLE aziende ADD COLUMN percorso_dropbox TEXT DEFAULT ''")
-            conn.commit()
-        except Exception:
-            pass
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS aziende (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            nome TEXT UNIQUE,
+            percorso_dropbox TEXT DEFAULT ''
+        )
+        """)
+        
+        cursor.execute("PRAGMA table_info(aziende)")
+        colonne = [riga[1] for riga in cursor.fetchall()]
+        if "percorso_dropbox" not in colonne:
+            try:
+                cursor.execute("ALTER TABLE aziende ADD COLUMN percorso_dropbox TEXT DEFAULT ''")
+            except Exception:
+                pass
 
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS lavoratori (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        azienda_id INTEGER,
-        nominativo TEXT, 
-        mansione TEXT, 
-        stato_scadenza_totale TEXT,
-        prescrizioni_mediche TEXT DEFAULT 'Nessuna prescrizione rilevata',
-        FOREIGN KEY(azienda_id) REFERENCES aziende(id),
-        UNIQUE(azienda_id, nominativo)
-    )
-    """)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS documenti_lavoratori (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, 
-        lavoratore_id INTEGER,
-        tipo_documento TEXT, 
-        stato_scadenza TEXT, 
-        data_scadenza TEXT,
-        FOREIGN KEY(lavoratore_id) REFERENCES lavoratori(id),
-        UNIQUE(lavoratore_id, tipo_documento)
-    )
-    """)
-    conn.commit()
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS lavoratori (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            azienda_id INTEGER,
+            nominativo TEXT, 
+            mansione TEXT, 
+            stato_scadenza_totale TEXT,
+            prescrizioni_mediche TEXT DEFAULT 'Nessuna prescrizione rilevata',
+            FOREIGN KEY(azienda_id) REFERENCES aziende(id),
+            UNIQUE(azienda_id, nominativo)
+        )
+        """)
+        
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS documenti_lavoratori (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, 
+            lavoratore_id INTEGER,
+            tipo_documento TEXT, 
+            stato_scadenza TEXT, 
+            data_scadenza TEXT,
+            FOREIGN KEY(lavoratore_id) REFERENCES lavoratori(id),
+            UNIQUE(lavoratore_id, tipo_documento)
+        )
+        """)
+        conn.commit()
 
 inizializza_db()
 
@@ -163,7 +166,6 @@ def estrai_testo_e_immagine_da_pdf(file_bytes):
             textpage = page.get_textpage()
             testo += textpage.get_text_range() + "\n"
         
-        # Se il testo estratto è troppo breve, estraiamo la prima pagina come immagine (scansione)
         if len(testo.strip()) < 30 and len(pdf) > 0:
             page = pdf[0]
             image = page.render(scale=2).to_pil()
@@ -180,7 +182,6 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
     oggi = datetime.now(fuso_orario).date()
     data_finale = None
 
-    # Tenta di leggere la data di scadenza esplicita
     if data_scad_str and data_scad_str != "NON_PRESENTI":
         for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
             try:
@@ -189,7 +190,6 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
             except ValueError:
                 pass
 
-    # Se manca la data esplicita, calcolala da emissione + anni di validità
     if not data_finale and data_emissione_str and data_emissione_str != "NON_PRESENTI" and anni_validita:
         for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
             try:
@@ -215,6 +215,7 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
 def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_selezionata):
     nome_lower = nome_file.lower()
     
+    # Gestione ZIP ricorsiva corretta
     if nome_lower.endswith(".zip"):
         risultati = []
         try:
@@ -222,12 +223,18 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, client, azienda_sele
                 for filename in z.namelist():
                     if filename.lower().endswith(('.pdf', '.docx')) and not filename.startswith('__MACOSX'):
                         unzipped_bytes = z.read(filename)
-                        res = elabora_singolo_documento_con_ai(unzipped_bytes, os.path.basename(filename), client, azienda_selezionata)
+                        res = elabora_singolo_documento_con_ai(
+                            file_bytes=unzipped_bytes, 
+                            nome_file=os.path.basename(filename), 
+                            client=client, 
+                            azienda_selezionata=azienda_selezionata
+                        )
                         if res:
                             risultati.append(res)
-            return f"ZIP elaborato ({len(risultati)} file utili trovati)"
+                        time.sleep(0.5)  # Previene Rate-limit API
+            return f"ZIP elaborato ({len(risultati)} file elaborati)"
         except Exception as e:
-            return f"Errore ZIP: {str(e)}"
+            return f"Errore estrazione ZIP: {str(e)}"
 
     if not (nome_lower.endswith(".pdf") or nome_lower.endswith(".docx")):
         return None
@@ -267,7 +274,6 @@ Restituisci ESCLUSIVAMENTE un JSON con questo formato:
 """
 
     try:
-        # Se il PDF era un'immagine/scansione senza testo, usiamo il modello VISION di Groq
         if img_base64:
             response = client.chat.completions.create(
                 model="llama-3.2-11b-vision-preview",
@@ -306,7 +312,6 @@ Restituisci ESCLUSIVAMENTE un JSON con questo formato:
         doc_grezzo = (dati_ai.get("documento_nome") or "Attestato Formazione").strip()
         doc_nome = normalizza_nome_documento(doc_grezzo)
         
-        # Calcolo preciso data e stato tramite Python
         data_scad, stato_calc = calcola_stato_e_data_python(
             dati_ai.get("data_scadenza"),
             dati_ai.get("data_emissione"),
@@ -316,45 +321,46 @@ Restituisci ESCLUSIVAMENTE un JSON con questo formato:
         prescr_raw = dati_ai.get("prescrizione_medica")
         prescr = prescr_raw.strip() if (prescr_raw and str(prescr_raw).lower() != "null") else 'Nessuna prescrizione rilevata'
 
-        cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
-        az_row = cursor.fetchone()
-        if az_row:
-            az_id = az_row[0]
-            
-            cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND UPPER(nominativo) = ?", (az_id, nom_lav))
-            operaio_db = cursor.fetchone()
-            
-            if operaio_db:
-                op_id = operaio_db[0]
-                if prescr != 'Nessuna prescrizione rilevata':
-                    cursor.execute("UPDATE lavoratori SET prescrizioni_mediche = ? WHERE id = ?", (prescr, op_id))
-            else:
-                cursor.execute("INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche) VALUES (?, ?, ?, '🔴 Da Verificare', ?)", (az_id, nom_lav, mans_lav, prescr))
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_selezionata,))
+            az_row = cursor.fetchone()
+            if az_row:
+                az_id = az_row[0]
+                
+                cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND UPPER(nominativo) = ?", (az_id, nom_lav))
+                operaio_db = cursor.fetchone()
+                
+                if operaio_db:
+                    op_id = operaio_db[0]
+                    if prescr != 'Nessuna prescrizione rilevata':
+                        cursor.execute("UPDATE lavoratori SET prescrizioni_mediche = ? WHERE id = ?", (prescr, op_id))
+                else:
+                    cursor.execute("INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche) VALUES (?, ?, ?, '🔴 Da Verificare', ?)", (az_id, nom_lav, mans_lav, prescr))
+                    op_id = cursor.lastrowid
+                
+                cursor.execute("DELETE FROM documenti_lavoratori WHERE lavoratore_id = ? AND tipo_documento = ?", (op_id, doc_nome))
+                cursor.execute("""
+                    INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
+                    VALUES (?, ?, ?, ?)
+                """, (op_id, doc_nome, stato_calc, data_scad))
+                
+                cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
+                tutti_stati = [r[0] for r in cursor.fetchall()]
+                stringa_totale = "".join(tutti_stati)
+                
+                if "🔴" in stringa_totale:
+                    nuovo_accesso = "🔴 INTERDETTO"
+                elif "🟡" in stringa_totale:
+                    nuovo_accesso = "🟡 MONITORARE"
+                else:
+                    nuovo_accesso = "🟢 ABILITATO"
+                
+                cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, op_id))
                 conn.commit()
-                op_id = cursor.lastrowid
-            
-            cursor.execute("DELETE FROM documenti_lavoratori WHERE lavoratore_id = ? AND tipo_documento = ?", (op_id, doc_nome))
-            cursor.execute("""
-                INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
-                VALUES (?, ?, ?, ?)
-            """, (op_id, doc_nome, stato_calc, data_scad))
-            
-            cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (op_id,))
-            tutti_stati = [r[0] for r in cursor.fetchall()]
-            stringa_totale = "".join(tutti_stati)
-            
-            if "🔴" in stringa_totale:
-                nuovo_accesso = "🔴 INTERDETTO"
-            elif "🟡" in stringa_totale:
-                nuovo_accesso = "🟡 MONITORARE"
-            else:
-                nuovo_accesso = "🟢 ABILITATO"
-            
-            cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, op_id))
-            conn.commit()
-            upload_db_to_dropbox()
 
-            return f"Registrato: {doc_nome} - {nom_lav} ({data_scad})"
+        upload_db_to_dropbox()
+        return f"Registrato: {doc_nome} - {nom_lav} ({data_scad})"
 
     except Exception as e:
         return f"Errore AI: {str(e)}"
@@ -370,7 +376,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-PASSWORD_CORRETTA = "Criansa2026"
+PASSWORD_CORRETTA = st.secrets.get("ADMIN_PASSWORD", "Criansa2026")
 
 if "uploader_key" not in st.session_state:
     st.session_state["uploader_key"] = 0
@@ -393,14 +399,17 @@ with st.sidebar:
     st.write("---")
     st.markdown("### 🔑 CONNETTI DROPBOX PERMANENTEMENTE")
     with st.expander("🛠️ Genera Refresh Token"):
+        app_key_dbx = st.secrets.get("DROPBOX_APP_KEY", "")
+        app_secret_dbx = st.secrets.get("DROPBOX_APP_SECRET", "")
+        
         st.markdown(f"""
-        1. [👉 **Clicca qui per autorizzare Dropbox**](https://www.dropbox.com/oauth2/authorize?client_id={DROPBOX_APP_KEY}&response_type=code&token_access_type=offline)
+        1. [👉 **Clicca qui per autorizzare Dropbox**](https://www.dropbox.com/oauth2/authorize?client_id={app_key_dbx}&response_type=code&token_access_type=offline)
         2. Autorizza l'app e copia il codice fornito.
         3. Incollalo subito sotto e premi il pulsante.
         """)
         code_input = st.text_input("Incolla il Codice Autorizzazione:")
         if st.button("🚀 Ottieni Refresh Token"):
-            if code_input:
+            if code_input and app_key_dbx and app_secret_dbx:
                 try:
                     res = requests.post(
                         "https://api.dropbox.com/oauth2/token",
@@ -408,18 +417,20 @@ with st.sidebar:
                             "code": code_input.strip(),
                             "grant_type": "authorization_code",
                         },
-                        auth=(DROPBOX_APP_KEY, DROPBOX_APP_SECRET)
+                        auth=(app_key_dbx, app_secret_dbx)
                     )
                     data = res.json()
                     if "refresh_token" in data:
                         r_token = data["refresh_token"]
                         st.success("✅ Token Generato!")
                         st.code(f'DROPBOX_REFRESH_TOKEN = "{r_token}"', language="toml")
-                        st.info("💡 Copia la riga di codice sopra e incollala nei tuoi Secrets su Streamlit Cloud!")
+                        st.info("💡 Copia la riga sopra e incollala nei tuoi Secrets su Streamlit Cloud!")
                     else:
                         st.error(f"Errore: {data.get('error_description', data)}")
                 except Exception as ex:
                     st.error(f"Errore: {ex}")
+            else:
+                st.error("⚠️ Assicurati che DROPBOX_APP_KEY e DROPBOX_APP_SECRET siano inseriti nei Secrets.")
 
     st.write("---")
     st.markdown("### 🔐 ACCESSO UTENTE")
@@ -436,8 +447,12 @@ with st.sidebar:
             
     st.write("---")
     st.markdown("### 🏢 AZIENDE IN CANTIERE")
-    cursor.execute("SELECT nome FROM aziende ORDER BY nome ASC")
-    lista_aziende = [riga[0] for riga in cursor.fetchall()]
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT nome FROM aziende ORDER BY nome ASC")
+        lista_aziende = [riga[0] for riga in cursor.fetchall()]
+
     azienda_selezionata = st.selectbox("Seleziona l'azienda:", lista_aziende) if lista_aziende else None
         
     if ha_permesso_modifica:
@@ -448,19 +463,23 @@ with st.sidebar:
         
         if st.button("Salva Azienda") and nuova_azienda:
             try:
-                cursor.execute("INSERT INTO aziende (nome, percorso_dropbox) VALUES (?, ?)", (nuova_azienda, percorso_dbx_nuova))
-                conn.commit()
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("INSERT INTO aziende (nome, percorso_dropbox) VALUES (?, ?)", (nuova_azienda, percorso_dbx_nuova))
+                    conn.commit()
                 upload_db_to_dropbox()
                 st.success("Azienda registrata!")
                 st.rerun()
             except sqlite3.IntegrityError: 
-                st.error("Esiste già.")
+                st.error("Azienda già esistente.")
 
         if azienda_selezionata:
             if st.button(f"🗑️ Elimina Azienda ({azienda_selezionata})"):
-                cursor.execute("DELETE FROM lavoratori WHERE azienda_id = (SELECT id FROM aziende WHERE nome = ?)", (azienda_selezionata,))
-                cursor.execute("DELETE FROM aziende WHERE nome = ?", (azienda_selezionata,))
-                conn.commit()
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM lavoratori WHERE azienda_id = (SELECT id FROM aziende WHERE nome = ?)", (azienda_selezionata,))
+                    cursor.execute("DELETE FROM aziende WHERE nome = ?", (azienda_selezionata,))
+                    conn.commit()
                 upload_db_to_dropbox()
                 st.success("Azienda eliminata!")
                 st.rerun()
@@ -473,13 +492,15 @@ with st.sidebar:
 
 # --- INTERFACCIA PRINCIPALE ---
 if azienda_selezionata:
-    st.markdown(f"# 🛡️ Dashboard CSE — Sistema di Controllo Integrato")
+    st.markdown("# 🛡️ Dashboard CSE — Sistema di Controllo Integrato")
     st.markdown(f"### 🏢 Impresa in analisi: **{azienda_selezionata}**")
     st.write("---")
     
-    cursor.execute("SELECT percorso_dropbox FROM aziende WHERE nome = ?", (azienda_selezionata,))
-    row_p = cursor.fetchone()
-    percorso_dropbox_ditta = row_p[0] if (row_p and row_p[0]) else ""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT percorso_dropbox FROM aziende WHERE nome = ?", (azienda_selezionata,))
+        row_p = cursor.fetchone()
+        percorso_dropbox_ditta = row_p[0] if (row_p and row_p[0]) else ""
 
     if ha_permesso_modifica:
         c_left, c_right = st.columns(2)
@@ -512,6 +533,7 @@ if azienda_selezionata:
                                             if msg:
                                                 st.info(f"➡️ {entry.name}: {msg}")
                                                 processed += 1
+                                            time.sleep(0.5)
                                 st.success(f"✅ Scansione completata su {processed} file trovati.")
                                 st.rerun()
                             except Exception as ex_dbx:
@@ -532,12 +554,14 @@ if azienda_selezionata:
                 st.rerun()
 
     # --- TABELLA E STATISTICHE ---
-    cursor.execute("""
-        SELECT id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche FROM lavoratori 
-        WHERE azienda_id = (SELECT id FROM aziende WHERE nome = ?)
-        ORDER BY nominativo ASC
-    """, (azienda_selezionata,))
-    lavoratori = cursor.fetchall()
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche FROM lavoratori 
+            WHERE azienda_id = (SELECT id FROM aziende WHERE nome = ?)
+            ORDER BY nominativo ASC
+        """, (azienda_selezionata,))
+        lavoratori = cursor.fetchall()
     
     if lavoratori:
         tot_lav = len(lavoratori)
@@ -560,8 +584,10 @@ if azienda_selezionata:
         for lav in lavoratori:
             lav_id, nome, mansione, accesso, prescrizioni = lav
             
-            cursor.execute("SELECT tipo_documento, stato_scadenza, data_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (lav_id,))
-            docs = cursor.fetchall()
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT tipo_documento, stato_scadenza, data_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (lav_id,))
+                docs = cursor.fetchall()
             
             tabella_pulita = []
             for doc_nome, validita, data_scad in docs:
@@ -581,32 +607,36 @@ if azienda_selezionata:
                 
                 if ha_permesso_modifica:
                     if st.button(f"❌ Rimuovi Questo Lavoratore", key=f"del_{lav_id}"):
-                        cursor.execute("DELETE FROM documenti_lavoratori WHERE lavoratore_id = ?", (lav_id,))
-                        cursor.execute("DELETE FROM lavoratori WHERE id = ?", (lav_id,))
-                        conn.commit()
+                        with get_db_connection() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute("DELETE FROM documenti_lavoratori WHERE lavoratore_id = ?", (lav_id,))
+                            cursor.execute("DELETE FROM lavoratori WHERE id = ?", (lav_id,))
+                            conn.commit()
                         upload_db_to_dropbox()
                         st.rerun()
 
         if ha_permesso_modifica:
             st.write("---")
             if st.button("🧹 PULISCILA ORA (ELIMINA RIGHE DUPLICATE VECCHIE)"):
-                cursor.execute("SELECT id, lavoratore_id, tipo_documento, stato_scadenza, data_scadenza FROM documenti_lavoratori")
-                tutti_i_docs = cursor.fetchall()
-                cursor.execute("DELETE FROM documenti_lavoratori")
-                
-                mantenuti = {}
-                for d_id, lav_id, t_doc, st_scad, d_scad in tutti_i_docs:
-                    doc_norm = normalizza_nome_documento(t_doc)
-                    chiave = (lav_id, doc_norm)
-                    mantenuti[chiave] = (st_scad, d_scad)
-                
-                for (lav_id, doc_norm), (st_scad, d_scad) in mantenuti.items():
-                    cursor.execute("""
-                        INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
-                        VALUES (?, ?, ?, ?)
-                    """, (lav_id, doc_norm, st_scad, d_scad))
-                
-                conn.commit()
+                with get_db_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT id, lavoratore_id, tipo_documento, stato_scadenza, data_scadenza FROM documenti_lavoratori")
+                    tutti_i_docs = cursor.fetchall()
+                    cursor.execute("DELETE FROM documenti_lavoratori")
+                    
+                    mantenuti = {}
+                    for d_id, lav_id, t_doc, st_scad, d_scad in tutti_i_docs:
+                        doc_norm = normalizza_nome_documento(t_doc)
+                        chiave = (lav_id, doc_norm)
+                        mantenuti[chiave] = (st_scad, d_scad)
+                    
+                    for (lav_id, doc_norm), (st_scad, d_scad) in mantenuti.items():
+                        cursor.execute("""
+                            INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza)
+                            VALUES (?, ?, ?, ?)
+                        """, (lav_id, doc_norm, st_scad, d_scad))
+                    
+                    conn.commit()
                 upload_db_to_dropbox()
                 st.success("✨ Tabella pulita con successo!")
                 st.rerun()
