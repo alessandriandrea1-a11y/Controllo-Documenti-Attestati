@@ -208,7 +208,6 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
     oggi = datetime.now(fuso_orario).date()
     
     doc_lower = (tipo_documento or "").lower()
-    
     is_senza_scadenza = any(termine in doc_lower for termine in ["tesserino", "badge", "riconoscimento", "dpi", "consegna", "dispositivi"])
     
     if is_senza_scadenza:
@@ -255,22 +254,14 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
         return data_formattata, "🟢 In Regola"
 
 def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
-    """
-    Filtro preliminare intelligente: 
-    1. Controlla il nome del file per escludere fatture o documenti commerciali evidenti.
-    2. Esegue una micro-analisi nel testo interno estratto per cercare parole chiave di sicurezza/attestati.
-    """
     nome_lower = nome_file.lower()
     
-    # Se il nome contiene termini palesemente commerciali ed estranei alla sicurezza
     parole_escluse_nome = ["fattura", "fatture", "preventivo", "ordine", "ddt", "bolla", "contabilita", "estratto", "pagamento", "acconto", "saldo", "banca", "bonifico"]
     if any(p in nome_lower for p in parole_escluse_nome):
-        # Doppio controllo di sicurezza: se nel testo interno ci fosse per assurdo un attestato, diamo comunque la precedenza al testo, altrimenti scartiamo
         testo_check = (testo_estratto or "").lower()
         if not any(k in testo_check for k in ["attestato", "formazione", "corso sicurezza", "idoneità sanitaria", "visita medica"]):
             return False
 
-    # Elenco completo di parole chiave relative alla sicurezza sul lavoro e visite mediche
     parole_chiave_sicurezza = [
         "attestato", "formazione", "corso", "sicurezza", "patentino", "idoneità", "idoneita", 
         "visita", "medica", "medico", "lavoratore", "preposto", "dirigente", "antincendio", 
@@ -279,21 +270,15 @@ def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
         "dlgs 81", "formazione lavoratori", "formazione accordo stato regioni", "sorveglianza sanitaria"
     ]
     
-    # 1. Verifica se il nome del file contiene almeno una parola chiave di sicurezza
     if any(p in nome_lower for p in parole_chiave_sicurezza):
         return True
         
-    # 2. MICRO-CONTROLLO INTERNO NEL TESTO: analizziamo il testo estratto (es. la prima pagina)
     testo_lower = (testo_estratto or "").lower()
-    
-    # Contiamo quante parole chiave di sicurezza compaiono nel testo del documento
     match_testo = sum(1 for p in parole_chiave_sicurezza if p in testo_lower)
     
-    # Se nel documento compaiono almeno 2 riscontri di sicurezza, il file è pertinente (es. un PDF scansionato o nominato con codice)
     if match_testo >= 2:
         return True
         
-    # Se non c'è alcun riscontro né nel nome né dentro il testo, lo scartiamo per non sprecare token
     return False
 
 def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client, azienda_selezionata):
@@ -335,14 +320,11 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
     if nome_lower.endswith(".pdf"):
         pagine = estrai_pagine_da_pdf(file_bytes)
         messaggi_esito = []
-        
-        # Uniamo il testo di tutte le pagine per effettuare la micro-verificata interna preliminare
         testo_totale_pdf = " ".join([p["testo"] for p in pagine])
         
-        # CONTROLLO DI PERTINENZA INTEGRATO (Nome + Testo Interno)
         if not e_documento_sicurezza_pertinente(nome_file, testo_totale_pdf):
             registra_file_processato(path_univoco)
-            return None # Scartato silenziosamente perché privo di contenuti di sicurezza
+            return None
         
         for pag in pagine:
             testo_estratto = pag["testo"]
@@ -378,7 +360,6 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
         return None
 
     else:
-        # DOCX singolo
         testo_estratto = ""
         try:
             testo_estratto = docx2txt.process(io.BytesIO(file_bytes))
@@ -456,16 +437,17 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
                 response_format={"type": "json_object"}
             )
 
-        dati_ai = json.loads(response.choices[0].message.content)
+        contenuto_risposta = response.choices[0].message.content
+        dati_ai = json.loads(contenuto_risposta)
 
         if not dati_ai.get("documento_pertinente", True):
             registra_file_processato(path_univoco)
-            return None
+            return None, False
 
         nom_lav = pulisci_nome_rigido(dati_ai.get("lavoratore"))
         if nom_lav == "SCONOSCIUTO":
             registra_file_processato(path_univoco)
-            return None
+            return None, False
 
         mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
         doc_nome = (dati_ai.get("documento_nome") or "Attestato Generico").strip()
