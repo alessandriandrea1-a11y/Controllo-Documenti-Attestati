@@ -542,6 +542,7 @@ st.markdown("""
     .metric-card h3 { margin: 0; font-size: 16px; color: #555; }
     .metric-card h2 { margin: 10px 0 0 0; font-size: 28px; color: #111; }
     .prescrizione-box { background-color: #fff3e0; border-left: 5px solid #ff9800; padding: 10px; margin-bottom: 15px; border-radius: 4px; font-size: 14px; }
+    .status-meter { background-color: #ffffff; padding: 10px 14px; border-radius: 6px; border: 1px solid #d1d5db; margin-top: 10px; font-size: 13px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -560,12 +561,52 @@ with st.sidebar:
     
     if api_key_manuale.strip() != "":
         api_key_inserita = api_key_manuale.strip()
-        st.success("🔑 API Key Groq attiva!")
     elif api_key_segreta:
         api_key_inserita = api_key_segreta
-        st.info("🤖 API Key da Secrets attiva.")
     else:
         api_key_inserita = ""
+
+    # --- VERIFICA CHIAVE ED ESTRAZIONE CONTATORI DI LIMITE ---
+    if api_key_inserita:
+        try:
+            url_test = "https://api.groq.com/openai/v1/chat/completions"
+            headers_test = {
+                "Authorization": f"Bearer {api_key_inserita}",
+                "Content-Type": "application/json"
+            }
+            body_test = {
+                "model": "llama-3.3-70b-versatile",
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1
+            }
+            
+            resp_test = requests.post(url_test, headers=headers_test, json=body_test, timeout=10)
+            
+            if resp_test.status_code == 200:
+                st.success("🟢 API Key Valida e Funzionante!")
+                
+                # Lettura header di rate limit Groq
+                req_remaining_day = resp_test.headers.get("x-ratelimit-remaining-requests-day", "N/D")
+                req_limit_day = resp_test.headers.get("x-ratelimit-limit-requests-day", "14400")
+                req_remaining_min = resp_test.headers.get("x-ratelimit-remaining-requests-minute", "N/D")
+                tok_remaining_min = resp_test.headers.get("x-ratelimit-remaining-tokens-minute", "N/D")
+                
+                st.markdown(f"""
+                <div class="status-meter">
+                    📊 <b>Stato Richieste Groq (Rimanenti):</b><br/>
+                    • 📆 <b>Giornaliere (RPD):</b> {req_remaining_day} / {req_limit_day}<br/>
+                    • ⏱️ <b>Al Minuto (RPM):</b> {req_remaining_min}<br/>
+                    • 🔤 <b>Token Minuto (TPM):</b> {tok_remaining_min}
+                </div>
+                """, unsafe_allow_html=True)
+            elif resp_test.status_code == 401:
+                st.error("🔴 API Key NON valida o disattivata.")
+            elif resp_test.status_code == 429:
+                st.warning("🟡 Limite di token/minuto raggiunto. Attendi circa 60 secondi.")
+            else:
+                st.warning(f"⚠️ Errore test API: {resp_test.status_code}")
+        except Exception as e_test:
+            st.error(f"⚠️ Impossibile verificare la chiave: {e_test}")
 
     st.write("---")
     st.markdown("### 🔐 ACCESSO UTENTE")
