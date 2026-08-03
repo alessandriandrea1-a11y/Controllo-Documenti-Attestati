@@ -23,7 +23,7 @@ st.set_page_config(layout="wide", page_title="Dashboard CSE — Controllo Comple
 # --- CONFIGURAZIONE DROPBOX E DATABASE ---
 DB_FILE_NAME = "database_sicurezza.db"
 
-# Durate legali predefinite dei corsi di formazione sulla sicurezza (in Anni)
+# Durate legali predefinite dei corsi di formazione sulla sicurezza (in Anni) - Normativa Italiana D.Lgs 81/08
 DURATA_CORSI_ANNI = {
     "preposto": 2,
     "primo soccorso": 3,
@@ -278,7 +278,7 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
             except ValueError:
                 pass
 
-    # 2. Se manca la data di scadenza ma abbiamo la data di fine corso / emissione
+    # 2. Se manca la data di scadenza esplicita, calcolala dalla data di fine corso/emissione
     if not data_finale and data_emissione_str and data_emissione_str != "NON_PRESENTI":
         if not anni_validita or int(anni_validita) <= 0:
             anni_validita = stima_anni_validita_da_tipo(tipo_documento)
@@ -362,8 +362,9 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
 
     try:
         if img_base64:
+            # Uilizza il modello Vision di Groq attualmente supportato
             response = client.chat.completions.create(
-                model="llama-3.2-11b-vision-instruct",
+                model="llama-3.2-11b-vision-preview",
                 messages=[
                     {
                         "role": "user",
