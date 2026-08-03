@@ -57,10 +57,8 @@ def pulisci_percorso_dropbox(percorso_input):
     if not percorso_input:
         return ""
     
-    # 1. Decodifica i caratteri percent-encoded (trasforma %20 in spazi)
     p = urllib.parse.unquote(str(percorso_input)).strip()
     
-    # 2. Rimuovi domini e prefissi di Dropbox se incollati da URL browser
     if "dropbox.com" in p:
         if "/home" in p:
             p = p.split("/home")[-1]
@@ -81,14 +79,12 @@ def pulisci_percorso_dropbox(percorso_input):
 
 def estrai_nome_lavoratore_da_percorso(path_file):
     """
-    Se il file si trova in una struttura tipo .../2. Dipendenti/Barbera Gabriele/attestato.pdf,
-    estrae 'Barbera Gabriele' come fallback per l'AI.
+    Estrae 'Barbera Gabriele' se il file sta in .../2. Dipendenti/Barbera Gabriele/attestato.pdf
     """
     try:
         parti = [p.strip() for p in path_file.split('/') if p.strip()]
         if len(parti) >= 2:
             cartella_padre = parti[-2]
-            # Esclude cartelle di sistema/generiche
             cartelle_escluse = ["1. ditta", "2. dipendenti", "3. mezzi", "ditte", "attestati", "documenti", "pdf", "sub"]
             if not any(c in cartella_padre.lower() for c in cartelle_escluse) and len(cartella_padre) > 3:
                 return cartella_padre
@@ -246,20 +242,9 @@ def estrai_pagine_da_pdf(file_bytes):
             textpage = page.get_textpage()
             testo_pagina = textpage.get_text_range().strip()
             
-            img_base64 = None
-            if len(testo_pagina) < 30:
-                try:
-                    image = page.render(scale=2).to_pil()
-                    buffered = io.BytesIO()
-                    image.save(buffered, format="JPEG")
-                    img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                except Exception:
-                    pass
-            
             pagine_estratte.append({
                 "numero_pagina": i + 1,
-                "testo": testo_pagina,
-                "immagine": img_base64
+                "testo": testo_pagina
             })
     except Exception:
         pass
@@ -346,34 +331,22 @@ def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
     testo_lower = (testo_estratto or "").lower()
     match_testo = sum(1 for p in parole_chiave_sicurezza if p in testo_lower)
     
-    return match_testo >= 1
+    return match_testo >= 1 or len(testo_estratto.strip()) == 0
 
-def _esegui_chiamata_ai_e_salvataggio(testo_estratto, img_base64, nome_file, path_univoco, client, azienda_selezionata):
+def _esegui_chiamata_ai_e_salvataggio(testo_estratto, nome_file, path_univoco, client, azienda_selezionata):
     
     lavoratore_fallback = estrai_nome_lavoratore_da_percorso(path_univoco)
     
-    system_prompt = f"""
-Sei un esperto verificatore di documenti di cantiere e sicurezza sul lavoro (CSE).
-Analizza il documento ed estrai con la massima precisione i dati del lavoratore e del documento.
+    system_prompt = f"""Sei un esperto verificatore di documenti di cantiere e sicurezza sul lavoro (CSE).
+Analizza il testo estratto dal documento ed estrai con la massima precisione i dati del lavoratore e del documento.
 
-NOTA IMPORTANTE PER IL LAVORATORE:
-Se nel testo del documento NON riesci a identificare con assoluta certezza il Nome e Cognome del lavoratore, utilizza questo nome estratto dalla struttura delle cartelle: "{lavoratore_fallback or 'SCONOSCIUTO'}".
+NOTA IMPORTANTE: Se nel testo NON riesci a identificare con certezza il Nome e Cognome del lavoratore, usa questo nome estratto dalla cartella: "{lavoratore_fallback or 'SCONOSCIUTO'}".
 
-REGOLE ESSENZIALI PER DATE E CALCOLO SCADENZE:
-1. Data Rilascio/Emissione/Fine Corso: Cerca la data in cui il corso è stato completato o la data di rilascio (GG/MM/AAAA).
-2. Data Scadenza: Se NON è indicata esplicitamente nel testo, metti "NON_PRESENTI".
-3. Tesserini/Badge e Consegna DPI: Imposta sempre "data_scadenza": "NON_PRESENTI".
+REGOLE PER DATE E SCADENZE:
+1. Data Emissione: GG/MM/AAAA oppure NON_PRESENTI.
+2. Data Scadenza: GG/MM/AAAA oppure NON_PRESENTI (Tesserini, DPI = NON_PRESENTI).
 
-Dati richiesti:
-1. Lavoratore (Nome e Cognome).
-2. Mansione.
-3. Nome ESATTO e SPECIFICO del documento (es. "Attestato Preposto", "Idoneità Sanitaria", "Patentino PLE", "Verbale Consegna DPI").
-4. Data emissione / fine corso (GG/MM/AAAA) oppure NON_PRESENTI.
-5. Data di scadenza esplicita (GG/MM/AAAA) oppure NON_PRESENTI.
-6. Anni di validità se presenti nel testo, altrimenti null.
-7. Prescrizioni sanitarie (se visita medica).
-
-Restituisci ESCLUSIVAMENTE un JSON con questo schema:
+Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
 {{
     "documento_pertinente": true,
     "lavoratore": "NOME COGNOME",
@@ -383,34 +356,20 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
     "data_scadenza": "GG/MM/AAAA oppure NON_PRESENTI",
     "anni_validita": null,
     "prescrizione_medica": "Nessuna prescrizione rilevata"
-}}
-"""
+}}"""
+
+    prompt_user = f"Nome del File: {nome_file}\nPercorso: {path_univoco}\nTesto Estratto:\n{testo_estratto if testo_estratto else 'Immagine Scansionata senza testo leggibile'}"
 
     try:
-        if img_base64:
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": system_prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"}}
-                        ]
-                    }
-                ],
-                response_format={"type": "json_object"}
-            )
-        else:
-            prompt_user = f"Nome del File: {nome_file}\nTesto Estratto:\n{testo_estratto}"
-            response = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt_user}
-                ],
-                response_format={"type": "json_object"}
-            )
+        # STRINGA UNICA E RIGIDA PER EVITARE L'ERRORE 400 SU GROQ
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": str(system_prompt)},
+                {"role": "user", "content": str(prompt_user)}
+            ],
+            response_format={"type": "json_object"}
+        )
 
         contenuto_risposta = response.choices[0].message.content
         dati_ai = json.loads(contenuto_risposta)
@@ -421,7 +380,6 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
 
         nom_lav = pulisci_nome_rigido(dati_ai.get("lavoratore"))
         
-        # Se l'AI non rileva il nome, usiamo il fallback dalla cartella
         if nom_lav == "SCONOSCIUTO" and lavoratore_fallback:
             nom_lav = pulisci_nome_rigido(lavoratore_fallback)
 
@@ -549,12 +507,8 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
         
         for pag in pagine:
             testo_estratto = pag["testo"]
-            img_base64 = pag["immagine"]
             num_pag = pag["numero_pagina"]
             
-            if not testo_estratto and not img_base64:
-                continue
-                
             sub_path_pag = f"{path_univoco}_pag_{num_pag}"
             if e_file_gia_processato(sub_path_pag):
                 continue
@@ -562,7 +516,6 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
             nome_file_pagina = f"{nome_file} (Pag. {num_pag})"
             esito_pag, stopped = _esegui_chiamata_ai_e_salvataggio(
                 testo_estratto=testo_estratto,
-                img_base64=img_base64,
                 nome_file=nome_file_pagina,
                 path_univoco=sub_path_pag,
                 client=client,
@@ -593,7 +546,6 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
             
         esito, stopped = _esegui_chiamata_ai_e_salvataggio(
             testo_estratto=testo_estratto,
-            img_base64=None,
             nome_file=nome_file,
             path_univoco=path_univoco,
             client=client,
