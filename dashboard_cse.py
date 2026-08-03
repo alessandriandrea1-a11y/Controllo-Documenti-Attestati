@@ -1,5 +1,5 @@
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 import io
 import json
 import os
@@ -23,15 +23,38 @@ st.set_page_config(layout="wide", page_title="Dashboard CSE — Controllo Comple
 # --- CONFIGURAZIONE DROPBOX E DATABASE ---
 DB_FILE_NAME = "database_sicurezza.db"
 
+# Durate legali predefinite dei corsi di formazione sulla sicurezza (in Anni)
+DURATA_CORSI_ANNI = {
+    "preposto": 2,
+    "primo soccorso": 3,
+    "antincendio": 3,
+    "visita medica": 1,
+    "idoneita": 1,
+    "idoneità": 1,
+    "sorveglianza sanitaria": 1,
+    "ple": 5,
+    "gru": 5,
+    "carrello": 5,
+    "muletto": 5,
+    "patentino": 5,
+    "escavatore": 5,
+    "spazi confinati": 5,
+    "lavori in quota": 5,
+    "formazione lavoratori": 5,
+    "generale": 5,
+    "specifica": 5,
+    "dirigente": 5,
+    "rspp": 5,
+    "aspp": 5,
+    "rls": 1
+}
+
 def pulisci_percorso_dropbox(percorso_input):
     if not percorso_input:
         return ""
     p = str(percorso_input).strip()
-    
-    # Decodifica caratteri speciali negli URL
     p = urllib.parse.unquote(p)
     
-    # Se l'utente incolla un link completo di Dropbox
     if "dropbox.com" in p:
         if "/home" in p:
             p = p.split("/home")[-1]
@@ -42,7 +65,6 @@ def pulisci_percorso_dropbox(percorso_input):
         elif "/scl/fo/" in p:
             p = p.split("/scl/fo/")[-1]
             
-    # Rimuovi eventuali parametri query (es. ?dl=0)
     if "?" in p:
         p = p.split("?")[0]
         
@@ -220,6 +242,13 @@ def estrai_pagine_da_pdf(file_bytes):
         pass
     return pagine_estratte
 
+def stima_anni_validita_da_tipo(tipo_documento):
+    doc_lower = (tipo_documento or "").lower()
+    for chiave, anni in DURATA_CORSI_ANNI.items():
+        if chiave in doc_lower:
+            return anni
+    return 5  # Valore predefinito per la maggior parte dei corsi D.Lgs 81/08
+
 def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita, tipo_documento=""):
     fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
     oggi = datetime.now(fuso_orario).date()
@@ -240,6 +269,7 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
 
     data_finale = None
 
+    # 1. Se c'è una data di scadenza esplicita
     if data_scad_str and data_scad_str != "NON_PRESENTI":
         for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
             try:
@@ -248,7 +278,11 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
             except ValueError:
                 pass
 
-    if not data_finale and data_emissione_str and data_emissione_str != "NON_PRESENTI" and anni_validita:
+    # 2. Se manca la data di scadenza ma abbiamo la data di fine corso / emissione
+    if not data_finale and data_emissione_str and data_emissione_str != "NON_PRESENTI":
+        if not anni_validita or int(anni_validita) <= 0:
+            anni_validita = stima_anni_validita_da_tipo(tipo_documento)
+            
         for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
             try:
                 dt_em = datetime.strptime(data_emissione_str, fmt).date()
@@ -296,19 +330,21 @@ def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
 def _esegui_chiamata_ai_e_salvataggio(testo_estratto, img_base64, nome_file, path_univoco, client, azienda_selezionata):
     system_prompt = """
 Sei un esperto verificatore di documenti di cantiere e sicurezza sul lavoro (CSE).
-Analizza il documento ed estrai con la massima precisione i dati del lavoratore e del documento/attestato/visita medica/consegna DPI/tesserino.
+Analizza il documento ed estrai con la massima precisione i dati del lavoratore e del documento.
 
-REGOLE IMPORTANTI SULLA SCADENZA:
-- Per i **Tesserini di riconoscimento / Badge** e per i **verbali di Consegna DPI (Dispositivi di Protezione Individuale)** NON ESISTE una data di scadenza per legge. Per questi documenti imposta "data_scadenza": "NON_PRESENTI" e "anni_validita": null, concentrandoti unicamente sull'estrazione della data di emissione o di consegna.
-- Per gli altri documenti (attestati di formazione, visite mediche, ecc.) estrai la data di scadenza o calcolala se c'è la validità in anni.
+REGOLE ESSENZIALI PER DATE E CALCOLO SCADENZE:
+1. **Data Rilascio/Emissione/Fine Corso**: Cerca la data in cui il corso è stato completato, concluso o la data di rilascio del documento (es. "Svoltosi il...", "Concluso il...", "Data rilascio"). Formato GG/MM/AAAA.
+2. **Data Scadenza**: Se è presente nel testo estraila. Se NON è indicata nel testo, metti "NON_PRESENTI" (verrà calcolata automaticamente dal sistema in base alla tipologia di corso).
+3. **Anni Validità**: Se specificati esplicitamente estraili (es. 2, 3, 5), altrimenti imposta null.
+4. **Tesserini e Consegna DPI**: Imposta sempre "data_scadenza": "NON_PRESENTI".
 
 Dati richiesti:
 1. Lavoratore (Nome e Cognome).
 2. Mansione.
-3. Nome ESATTO e SPECIFICO del documento (es. "Tesserino di Riconoscimento", "Verbale Consegna DPI", "Attestato Antincendio", "Idoneità Sanitaria").
-4. Data emissione / rilascio / consegna (GG/MM/AAAA) oppure NON_PRESENTI.
-5. Data di scadenza esplicita (GG/MM/AAAA) oppure NON_PRESENTI (obbligatorio NON_PRESENTI per tesserini e DPI).
-6. Anni di validità (es. 3, 5) se applicabile, altrimenti null.
+3. Nome ESATTO e SPECIFICO del documento (es. "Attestato Preposto", "Idoneità Sanitaria", "Patentino PLE", "Verbale Consegna DPI").
+4. Data emissione / fine corso (GG/MM/AAAA) oppure NON_PRESENTI.
+5. Data di scadenza esplicita (GG/MM/AAAA) oppure NON_PRESENTI.
+6. Anni di validità se presenti nel testo, altrimenti null.
 7. Prescrizioni sanitarie (se visita medica).
 
 Restituisci ESCLUSIVAMENTE un JSON con questo schema:
@@ -403,13 +439,13 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
                         SET stato_scadenza = ?, data_scadenza = ?, nome_file_origine = ?
                         WHERE id = ?
                     """, (stato_calc, data_scad, nome_file, doc_esistente[0]))
-                    msg_esito = f"🔄 Aggiornato: {doc_nome} ({nom_lav})"
+                    msg_esito = f"🔄 Aggiornato: {doc_nome} ({nom_lav}) -> Scadenza: {data_scad}"
                 else:
                     cursor.execute("""
                         INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza, nome_file_origine)
                         VALUES (?, ?, ?, ?, ?)
                     """, (op_id, doc_nome, stato_calc, data_scad, nome_file))
-                    msg_esito = f"✨ Registrato: {doc_nome} ({nom_lav})"
+                    msg_esito = f"✨ Registrato: {doc_nome} ({nom_lav}) -> Scadenza: {data_scad}"
                     
                 conn.commit()
 
@@ -566,7 +602,6 @@ with st.sidebar:
     else:
         api_key_inserita = ""
 
-    # --- VERIFICA CHIAVE ED ESTRAZIONE CONTATORI DI LIMITE ---
     if api_key_inserita:
         try:
             url_test = "https://api.groq.com/openai/v1/chat/completions"
@@ -585,7 +620,6 @@ with st.sidebar:
             if resp_test.status_code == 200:
                 st.success("🟢 API Key Valida e Funzionante!")
                 
-                # Lettura header di rate limit Groq
                 req_remaining_day = resp_test.headers.get("x-ratelimit-remaining-requests-day", "N/D")
                 req_limit_day = resp_test.headers.get("x-ratelimit-limit-requests-day", "14400")
                 req_remaining_min = resp_test.headers.get("x-ratelimit-remaining-requests-minute", "N/D")
@@ -753,110 +787,124 @@ if azienda_selezionata:
                                                 scartati += 1
                                                 continue
 
-                                            st.write(f"🔍 Controllo file: `{entry.name}`...")
-                                            _, file_res = dbx.files_download(entry.path_lower)
-                                            f_bytes = file_res.content
-                                            
-                                            msg, stopped = elabora_singolo_documento_con_ai(
-                                                file_bytes=f_bytes, 
-                                                nome_file=entry.name, 
+                                            _, res_file = dbx.files_download(entry.path_lower)
+                                            esito_file, stopped = elabora_singolo_documento_con_ai(
+                                                file_bytes=res_file.content,
+                                                nome_file=entry.name,
                                                 path_univoco=path_univoco,
-                                                client=client, 
+                                                client=client,
                                                 azienda_selezionata=azienda_selezionata
                                             )
                                             
                                             if stopped:
-                                                st.error(f"{msg}")
+                                                st.error(esito_file)
                                                 bloccato_per_limit = True
+                                                st.session_state["scansione_in_corso"] = False
                                                 break
                                                 
-                                            if msg:
-                                                st.info(f"➡️ {msg}")
+                                            if esito_file:
+                                                st.write(esito_file)
                                                 processed += 1
-                                            else:
-                                                scartati += 1
-                                            time.sleep(0.05)
-                                
-                                st.session_state["scansione_in_corso"] = False
-                                if bloccato_per_limit:
-                                    st.warning("⚠️ **Scansione messa in pausa.** Token Groq esauriti.")
-                                else:
-                                    st.success(f"✅ Scansione completata. Elaborati {processed} attestati. Scartati {scartati} file.")
-                                
-                                time.sleep(1)
-                                st.rerun()
-                            except Exception as ex_dbx:
-                                st.error(f"⚠️ Errore lettura cartella Dropbox: {ex_dbx}")
-                                st.session_state["scansione_in_corso"] = False
-            else:
-                st.warning("Nessun percorso Dropbox inserito per questa ditta.")
 
-    if file_caricato is not None and ha_permesso_modifica:
-        if not api_key_inserita:
-            st.error("🚨 Inserisci la tua chiave API Groq a sinistra!")
-        else:
-            with st.spinner("🧠 Elaborazione file/ZIP..."):
+                                if not bloccato_per_limit:
+                                    st.success(f"✅ Scansione completata! Processati {processed} nuovi file (scartati {scartati}).")
+                                    st.session_state["scansione_in_corso"] = False
+                                    st.rerun()
+
+                            except Exception as e_dbx:
+                                st.error(f"⚠️ Errore durante l'accesso a Dropbox: {e_dbx}")
+                                st.session_state["scansione_in_corso"] = False
+
+        with c_right:
+            st.markdown("#### 📄 Upload Diretto Locale")
+            if file_caricato and api_key_inserita:
                 client = Groq(api_key=api_key_inserita)
-                f_bytes = file_caricato.read()
-                path_fake = f"/upload_manuale/{file_caricato.name}"
-                
-                msg, stopped = elabora_singolo_documento_con_ai(
-                    file_bytes=f_bytes,
-                    nome_file=file_caricato.name,
-                    path_univoco=path_fake,
-                    client=client,
-                    azienda_selezionata=azienda_selezionata
-                )
-                
-                if stopped:
-                    st.error(msg)
-                elif msg:
-                    st.success(f"✅ Completato: {msg}")
-                else:
-                    st.warning("⚠️ Nessun attestato o documento rilevante trovato nel file.")
-                    
-                st.session_state["uploader_key"] += 1
-                time.sleep(1)
-                st.rerun()
+                with st.spinner("⏳ Analisi del file caricato in corso..."):
+                    bytes_data = file_caricato.read()
+                    esito_up, stopped = elabora_singolo_documento_con_ai(
+                        file_bytes=bytes_data,
+                        nome_file=file_caricato.name,
+                        path_univoco=f"upload_locale_{file_caricato.name}",
+                        client=client,
+                        azienda_selezionata=azienda_selezionata
+                    )
+                    if stopped:
+                        st.error(esito_up)
+                    elif esito_up:
+                        st.success(esito_up)
+                        st.session_state["uploader_key"] += 1
+                        st.rerun()
+                    else:
+                        st.info("ℹ️ Nessun documento rilevante estratto o file non di sicurezza.")
 
+    # --- VISUALIZZAZIONE TABELLARE E METRICHE ---
     st.write("---")
-
+    
     with get_db_connection() as conn:
-        df_lav = pd.read_sql_query("""
-            SELECT l.id, l.nominativo, l.mansione, l.stato_scadenza_totale, l.prescrizioni_mediche
+        df_lavoratori = pd.read_sql_query("""
+            SELECT l.id, l.nominativo AS [Lavoratore], l.mansione AS [Mansione], 
+                   l.stato_scadenza_totale AS [Stato Idoneità Cantiere], 
+                   l.prescrizioni_mediche AS [Prescrizioni Sanitarie]
             FROM lavoratori l
-            JOIN aziende a ON a.id = l.azienda_id
+            JOIN aziende a ON l.azienda_id = a.id
             WHERE a.nome = ?
             ORDER BY l.nominativo ASC
         """, conn, params=(azienda_selezionata,))
 
-    if not df_lav.empty:
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Totale Operai", len(df_lav))
-        c2.metric("🟢 Abilitati", len(df_lav[df_lav['stato_scadenza_totale'].str.contains("ABILITATO", na=False)]))
-        c3.metric("🟡 Da Monitorare", len(df_lav[df_lav['stato_scadenza_totale'].str.contains("MONITORARE", na=False)]))
-        c4.metric("🔴 Interdetti", len(df_lav[df_lav['stato_scadenza_totale'].str.contains("INTERDETTO|Da Verificare", na=False)]))
+    if not df_lavoratori.empty:
+        totale_lav = len(df_lavoratori)
+        abilitati = len(df_lavoratori[df_lavoratori["Stato Idoneità Cantiere"].str.contains("ABILITATO", na=False)])
+        monitorare = len(df_lavoratori[df_lavoratori["Stato Idoneità Cantiere"].str.contains("MONITORARE", na=False)])
+        interdetti = len(df_lavoratori[df_lavoratori["Stato Idoneità Cantiere"].str.contains("INTERDETTO", na=False)])
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.markdown(f'<div class="metric-card"><h3>👥 Lavoratori</h3><h2>{totale_lav}</h2></div>', unsafe_allow_html=True)
+        m2.markdown(f'<div class="metric-card"><h3>🟢 Abilitati</h3><h2>{abilitati}</h2></div>', unsafe_allow_html=True)
+        m3.markdown(f'<div class="metric-card"><h3>🟡 Monitorare</h3><h2>{monitorare}</h2></div>', unsafe_allow_html=True)
+        m4.markdown(f'<div class="metric-card"><h3>🔴 Interdetti</h3><h2>{interdetti}</h2></div>', unsafe_allow_html=True)
 
         st.write("---")
-        st.markdown("### 📋 Registro Lavoratori e Documenti")
+        st.markdown("### 📋 Elenco Personale e Stato Documentale")
 
-        for _, lav in df_lav.iterrows():
-            with st.expander(f"{lav['stato_scadenza_totale']} — **{lav['nominativo']}** ({lav['mansione']})"):
-                if lav['prescrizioni_mediche'] and lav['prescrizioni_mediche'] != 'Nessuna prescrizione rilevata':
-                    st.markdown(f"<div class='prescrizione-box'><b>⚠️ Prescrizione Medica:</b> {lav['prescrizioni_mediche']}</div>", unsafe_allow_html=True)
-                
-                with get_db_connection() as conn:
-                    df_doc = pd.read_sql_query("""
-                        SELECT tipo_documento, stato_scadenza, data_scadenza, nome_file_origine
-                        FROM documenti_lavoratori
-                        WHERE lavoratore_id = ?
-                    """, conn, params=(lav['id'],))
+        for idx, row in df_lavoratori.iterrows():
+            lav_id = row["id"]
+            nom = row["Lavoratore"]
+            mans = row["Mansione"]
+            stato = row["Stato Idoneità Cantiere"]
+            prescr = row["Prescrizioni Sanitarie"]
 
-                if not df_doc.empty:
-                    st.dataframe(df_doc, use_container_width=True)
+            # Recupera documenti e calcola il numero di attestati
+            with get_db_connection() as conn:
+                df_docs = pd.read_sql_query("""
+                    SELECT id, tipo_documento AS [Documento], stato_scadenza AS [Stato], 
+                           data_scadenza AS [Data Scadenza / Riferimento], nome_file_origine AS [File di Origine]
+                    FROM documenti_lavoratori
+                    WHERE lavoratore_id = ?
+                    ORDER BY data_scadenza ASC
+                """, conn, params=(lav_id,))
+
+            num_attestati = len(df_docs)
+
+            with st.expander(f"{stato} | **{nom}** ({mans}) — 📜 Attestati registrati: {num_attestati}"):
+                if prescr and prescr != 'Nessuna prescrizione rilevata':
+                    st.markdown(f'<div class="prescrizione-box">⚠️ <b>Prescrizioni Sanitarie:</b> {prescr}</div>', unsafe_allow_html=True)
+
+                if not df_docs.empty:
+                    st.dataframe(df_docs.drop(columns=["id"]), use_container_width=True)
                 else:
-                    st.info("Nessun documento o attestato presente a sistema.")
+                    st.write("❌ Nessun documento attualmente registrato per questo lavoratore.")
+
+                if ha_permesso_modifica:
+                    if st.button(f"🗑️ Rimuovi Lavoratore ({nom})", key=f"del_lav_{lav_id}"):
+                        with get_db_connection() as conn:
+                            cursor = conn.cursor()
+                            cursor.execute("DELETE FROM documenti_lavoratori WHERE lavoratore_id = ?", (lav_id,))
+                            cursor.execute("DELETE FROM lavoratori WHERE id = ?", (lav_id,))
+                            conn.commit()
+                        upload_db_to_dropbox()
+                        st.success(f"Lavoratore {nom} eliminato!")
+                        st.rerun()
     else:
-        st.info("Nessun lavoratore registrato per questa impresa.")
+        st.info("ℹ️ Nessun lavoratore o attestato registrato per questa ditta. Esegui la scansione della cartella Dropbox o carica un file manualmente.")
 else:
-    st.info("👈 Seleziona una ditta dal menu a sinistra per iniziare.")
+    st.info("👈 Seleziona o crea un'azienda dalla barra laterale per accedere al Pannello di Controllo CSE.")
