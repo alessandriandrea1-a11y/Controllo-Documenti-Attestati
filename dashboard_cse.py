@@ -23,7 +23,6 @@ st.set_page_config(layout="wide", page_title="Dashboard CSE — Controllo Comple
 # --- CONFIGURAZIONE DROPBOX E DATABASE ---
 DB_FILE_NAME = "database_sicurezza.db"
 
-# Durate legali predefinite dei corsi di formazione sulla sicurezza (in Anni) - Normativa Italiana D.Lgs 81/08
 DURATA_CORSI_ANNI = {
     "preposto": 2,
     "primo soccorso": 3,
@@ -50,10 +49,6 @@ DURATA_CORSI_ANNI = {
 }
 
 def pulisci_percorso_dropbox(percorso_input):
-    """
-    Pulisce e decodifica i percorsi di Dropbox.
-    Converte `%20` in spazi e rimuove prefissi URL.
-    """
     if not percorso_input:
         return ""
     
@@ -78,9 +73,6 @@ def pulisci_percorso_dropbox(percorso_input):
     return p
 
 def estrai_nome_lavoratore_da_percorso(path_file):
-    """
-    Estrae 'Barbera Gabriele' se il file sta in .../2. Dipendenti/Barbera Gabriele/attestato.pdf
-    """
     try:
         parti = [p.strip() for p in path_file.split('/') if p.strip()]
         if len(parti) >= 2:
@@ -194,7 +186,6 @@ def inizializza_db():
 
 inizializza_db()
 
-# --- GESTIONE TRACCIAMENTO FILE ---
 def e_file_gia_processato(path_file):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -208,7 +199,6 @@ def registra_file_processato(path_file):
         cursor.execute("INSERT OR REPLACE INTO file_processati (path_file, data_elaborazione) VALUES (?, ?)", (path_file, now_str))
         conn.commit()
 
-# --- UTILITIES ---
 def pulisci_nome_rigido(nome_grezzo):
     if not nome_grezzo:
         return "SCONOSCIUTO"
@@ -257,10 +247,39 @@ def stima_anni_validita_da_tipo(tipo_documento):
             return anni
     return 5
 
-def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita, tipo_documento=""):
+def calcola_stato_da_stringa_data(data_scad_str):
+    """
+    Ricalcola lo stato (🟢, 🟡, 🔴) partendo direttamente da una data GG/MM/AAAA.
+    Utilizzata sia per l'AI che per la modifica MANUALE dell'utente.
+    """
+    if not data_scad_str or data_scad_str in ["Da Verificare", "NON_PRESENTI"]:
+        return "Da Verificare", "🟡 In Scadenza"
+
     fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
     oggi = datetime.now(fuso_orario).date()
     
+    dt_scad = None
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
+        try:
+            dt_scad = datetime.strptime(data_scad_str, fmt).date()
+            break
+        except ValueError:
+            pass
+
+    if not dt_scad:
+        return data_scad_str, "🟢 In Regola"
+
+    data_formattata = dt_scad.strftime("%d/%m/%Y")
+    giorni_rimanenti = (dt_scad - oggi).days
+
+    if giorni_rimanenti < 0:
+        return data_formattata, "🔴 Scaduto"
+    elif giorni_rimanenti <= 60:
+        return data_formattata, "🟡 In Scadenza"
+    else:
+        return data_formattata, "🟢 In Regola"
+
+def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita, tipo_documento=""):
     doc_lower = (tipo_documento or "").lower()
     is_senza_scadenza = any(termine in doc_lower for termine in ["tesserino", "badge", "riconoscimento", "dpi", "consegna", "dispositivi"])
     
@@ -275,40 +294,22 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
                 pass
         return data_rif, "🟢 In Regola"
 
-    data_finale = None
+    data_finale_str = data_scad_str
 
-    if data_scad_str and data_scad_str != "NON_PRESENTI":
-        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
-            try:
-                data_finale = datetime.strptime(data_scad_str, fmt).date()
-                break
-            except ValueError:
-                pass
-
-    if not data_finale and data_emissione_str and data_emissione_str != "NON_PRESENTI":
+    if (not data_scad_str or data_scad_str == "NON_PRESENTI") and data_emissione_str and data_emissione_str != "NON_PRESENTI":
         if not anni_validita or int(anni_validita) <= 0:
             anni_validita = stima_anni_validita_da_tipo(tipo_documento)
             
         for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
             try:
                 dt_em = datetime.strptime(data_emissione_str, fmt).date()
-                data_finale = dt_em.replace(year=dt_em.year + int(anni_validita))
+                dt_scad = dt_em.replace(year=dt_em.year + int(anni_validita))
+                data_finale_str = dt_scad.strftime("%d/%m/%Y")
                 break
             except Exception:
                 pass
 
-    if not data_finale:
-        return "Da Verificare", "🟡 In Scadenza"
-
-    data_formattata = data_finale.strftime("%d/%m/%Y")
-    giorni_rimanenti = (data_finale - oggi).days
-
-    if giorni_rimanenti < 0:
-        return data_formattata, "🔴 Scaduto"
-    elif giorni_rimanenti <= 60:
-        return data_formattata, "🟡 In Scadenza"
-    else:
-        return data_formattata, "🟢 In Regola"
+    return calcola_stato_da_stringa_data(data_finale_str)
 
 def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
     nome_lower = nome_file.lower()
@@ -334,7 +335,6 @@ def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
     return match_testo >= 1 or len(testo_estratto.strip()) == 0
 
 def _esegui_chiamata_ai_e_salvataggio(testo_estratto, nome_file, path_univoco, client, azienda_selezionata):
-    
     lavoratore_fallback = estrai_nome_lavoratore_da_percorso(path_univoco)
     
     system_prompt = f"""Sei un esperto verificatore di documenti di cantiere e sicurezza sul lavoro (CSE).
@@ -361,7 +361,6 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
     prompt_user = f"Nome del File: {nome_file}\nPercorso: {path_univoco}\nTesto Estratto:\n{testo_estratto if testo_estratto else 'Immagine Scansionata senza testo leggibile'}"
 
     try:
-        # STRINGA UNICA E RIGIDA PER EVITARE L'ERRORE 400 SU GROQ
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
@@ -876,8 +875,80 @@ if azienda_selezionata:
                 else:
                     st.write("❌ Nessun documento attualmente registrato per questo lavoratore.")
 
+                # --- PANNELLO MODIFICA E NUOVO ATTESTATO MANUALE ---
                 if ha_permesso_modifica:
-                    if st.button(f"🗑️ Rimuovi Lavoratore ({nom})", key=f"del_lav_{lav_id}"):
+                    st.write("---")
+                    col_mod, col_add = st.columns(2)
+                    
+                    # 1. MODIFICA DOCUMENTO ESISTENTE
+                    with col_mod:
+                        st.markdown("✏️ **Modifica / Correggi Documento Esistente**")
+                        if not df_docs.empty:
+                            maggiori_options = {f"{r['Documento']} ({r['Data Scadenza / Riferimento']})": r['id'] for _, r in df_docs.iterrows()}
+                            scelta_doc_str = st.selectbox("Seleziona attestato da modificare:", list(maggiori_options.keys()), key=f"sel_doc_mod_{lav_id}")
+                            doc_id_selezionato = maggiori_options[scelta_doc_str]
+                            
+                            # Prende i dati attuali dal DB
+                            doc_corrente = df_docs[df_docs['id'] == doc_id_selezionato].iloc[0]
+                            
+                            nuovo_nome_doc = st.text_input("Nome Documento:", value=doc_corrente['Documento'], key=f"inp_nome_doc_{doc_id_selezionato}")
+                            nuova_data_scad = st.text_input("Data Scadenza / Riferimento (GG/MM/AAAA o Presente):", value=doc_corrente['Data Scadenza / Riferimento'], key=f"inp_data_doc_{doc_id_selezionato}")
+                            
+                            c_salva_mod, c_del_doc = st.columns(2)
+                            with c_salva_mod:
+                                if st.button("💾 Salva Modifica", key=f"btn_save_doc_{doc_id_selezionato}"):
+                                    data_scad_calc, nuovo_stato = calcola_stato_da_stringa_data(nuova_data_scad)
+                                    with get_db_connection() as conn:
+                                        cursor = conn.cursor()
+                                        cursor.execute("""
+                                            UPDATE documenti_lavoratori 
+                                            SET tipo_documento = ?, data_scadenza = ?, stato_scadenza = ?
+                                            WHERE id = ?
+                                        """, (nuovo_nome_doc.strip(), data_scad_calc, nuovo_stato, doc_id_selezionato))
+                                        conn.commit()
+                                    aggiorna_stato_generale_lavoratore(lav_id)
+                                    upload_db_to_dropbox()
+                                    st.success("Documento aggiornato!")
+                                    st.rerun()
+                                    
+                            with c_del_doc:
+                                if st.button("🗑️ Elimina Documento", key=f"btn_del_doc_{doc_id_selezionato}"):
+                                    with get_db_connection() as conn:
+                                        cursor = conn.cursor()
+                                        cursor.execute("DELETE FROM documenti_lavoratori WHERE id = ?", (doc_id_selezionato,))
+                                        conn.commit()
+                                    aggiorna_stato_generale_lavoratore(lav_id)
+                                    upload_db_to_dropbox()
+                                    st.success("Documento eliminato!")
+                                    st.rerun()
+                        else:
+                            st.caption("Nessun documento da modificare.")
+
+                    # 2. AGGIUNTA NUOVO DOCUMENTO MANUALE
+                    with col_add:
+                        st.markdown("➕ **Aggiungi Attestato / Documento Manualmente**")
+                        add_nome_doc = st.text_input("Nome Nuovo Documento:", placeholder="Es. Formazione Generale 4 ore", key=f"add_nome_{lav_id}")
+                        add_data_scad = st.text_input("Data Scadenza (GG/MM/AAAA) o 'Presente':", placeholder="Es. 15/05/2027", key=f"add_data_{lav_id}")
+                        
+                        if st.button("➕ Registra Documento", key=f"btn_add_doc_{lav_id}"):
+                            if add_nome_doc.strip():
+                                data_scad_calc, nuovo_stato = calcola_stato_da_stringa_data(add_data_scad.strip())
+                                with get_db_connection() as conn:
+                                    cursor = conn.cursor()
+                                    cursor.execute("""
+                                        INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza, nome_file_origine)
+                                        VALUES (?, ?, ?, ?, 'Inserimento Manuale')
+                                    """, (lav_id, add_nome_doc.strip(), nuovo_stato, data_scad_calc))
+                                    conn.commit()
+                                aggiorna_stato_generale_lavoratore(lav_id)
+                                upload_db_to_dropbox()
+                                st.success("Nuovo documento inserito con successo!")
+                                st.rerun()
+                            else:
+                                st.error("Inserisci almeno il nome del documento.")
+
+                    st.write("---")
+                    if st.button(f"🗑️ Rimuovi Interamente Lavoratore ({nom})", key=f"del_lav_{lav_id}"):
                         with get_db_connection() as conn:
                             cursor = conn.cursor()
                             cursor.execute("DELETE FROM documenti_lavoratori WHERE lavoratore_id = ?", (lav_id,))
