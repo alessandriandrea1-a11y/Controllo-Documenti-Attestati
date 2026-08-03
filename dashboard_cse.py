@@ -50,11 +50,17 @@ DURATA_CORSI_ANNI = {
 }
 
 def pulisci_percorso_dropbox(percorso_input):
+    """
+    Pulisce e decodifica i percorsi di Dropbox.
+    Converte `%20` in spazi e rimuove prefissi URL.
+    """
     if not percorso_input:
         return ""
-    p = str(percorso_input).strip()
-    p = urllib.parse.unquote(p)
     
+    # 1. Decodifica i caratteri percent-encoded (trasforma %20 in spazi)
+    p = urllib.parse.unquote(str(percorso_input)).strip()
+    
+    # 2. Rimuovi domini e prefissi di Dropbox se incollati da URL browser
     if "dropbox.com" in p:
         if "/home" in p:
             p = p.split("/home")[-1]
@@ -72,6 +78,23 @@ def pulisci_percorso_dropbox(percorso_input):
     if p and not p.startswith("/"):
         p = "/" + p
     return p
+
+def estrai_nome_lavoratore_da_percorso(path_file):
+    """
+    Se il file si trova in una struttura tipo .../2. Dipendenti/Barbera Gabriele/attestato.pdf,
+    estrae 'Barbera Gabriele' come fallback per l'AI.
+    """
+    try:
+        parti = [p.strip() for p in path_file.split('/') if p.strip()]
+        if len(parti) >= 2:
+            cartella_padre = parti[-2]
+            # Esclude cartelle di sistema/generiche
+            cartelle_escluse = ["1. ditta", "2. dipendenti", "3. mezzi", "ditte", "attestati", "documenti", "pdf", "sub"]
+            if not any(c in cartella_padre.lower() for c in cartelle_escluse) and len(cartella_padre) > 3:
+                return cartella_padre
+    except Exception:
+        pass
+    return None
 
 def get_dropbox_client():
     refresh_token = st.secrets.get("DROPBOX_REFRESH_TOKEN", "")
@@ -323,18 +346,23 @@ def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
     testo_lower = (testo_estratto or "").lower()
     match_testo = sum(1 for p in parole_chiave_sicurezza if p in testo_lower)
     
-    return match_testo >= 2
+    return match_testo >= 1
 
 def _esegui_chiamata_ai_e_salvataggio(testo_estratto, img_base64, nome_file, path_univoco, client, azienda_selezionata):
-    system_prompt = """
+    
+    lavoratore_fallback = estrai_nome_lavoratore_da_percorso(path_univoco)
+    
+    system_prompt = f"""
 Sei un esperto verificatore di documenti di cantiere e sicurezza sul lavoro (CSE).
 Analizza il documento ed estrai con la massima precisione i dati del lavoratore e del documento.
 
+NOTA IMPORTANTE PER IL LAVORATORE:
+Se nel testo del documento NON riesci a identificare con assoluta certezza il Nome e Cognome del lavoratore, utilizza questo nome estratto dalla struttura delle cartelle: "{lavoratore_fallback or 'SCONOSCIUTO'}".
+
 REGOLE ESSENZIALI PER DATE E CALCOLO SCADENZE:
-1. **Data Rilascio/Emissione/Fine Corso**: Cerca la data in cui il corso è stato completato, concluso o la data di rilascio del documento (es. "Svoltosi il...", "Concluso il...", "Data rilascio"). Formato GG/MM/AAAA.
-2. **Data Scadenza**: Se è presente nel testo estraila. Se NON è indicata nel testo, metti "NON_PRESENTI" (verrà calcolata automaticamente dal sistema in base alla tipologia di corso).
-3. **Anni Validità**: Se specificati esplicitamente estraili (es. 2, 3, 5), altrimenti imposta null.
-4. **Tesserini e Consegna DPI**: Imposta sempre "data_scadenza": "NON_PRESENTI".
+1. Data Rilascio/Emissione/Fine Corso: Cerca la data in cui il corso è stato completato o la data di rilascio (GG/MM/AAAA).
+2. Data Scadenza: Se NON è indicata esplicitamente nel testo, metti "NON_PRESENTI".
+3. Tesserini/Badge e Consegna DPI: Imposta sempre "data_scadenza": "NON_PRESENTI".
 
 Dati richiesti:
 1. Lavoratore (Nome e Cognome).
@@ -346,7 +374,7 @@ Dati richiesti:
 7. Prescrizioni sanitarie (se visita medica).
 
 Restituisci ESCLUSIVAMENTE un JSON con questo schema:
-{
+{{
     "documento_pertinente": true,
     "lavoratore": "NOME COGNOME",
     "mansione": "Operaio/Preposto/ecc",
@@ -355,11 +383,10 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
     "data_scadenza": "GG/MM/AAAA oppure NON_PRESENTI",
     "anni_validita": null,
     "prescrizione_medica": "Nessuna prescrizione rilevata"
-}
+}}
 """
 
     try:
-        # Utilizza il modello stabile llama-3.3-70b-versatile per tutte le elaborazioni
         if img_base64:
             response = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
@@ -393,6 +420,11 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
             return None, False
 
         nom_lav = pulisci_nome_rigido(dati_ai.get("lavoratore"))
+        
+        # Se l'AI non rileva il nome, usiamo il fallback dalla cartella
+        if nom_lav == "SCONOSCIUTO" and lavoratore_fallback:
+            nom_lav = pulisci_nome_rigido(lavoratore_fallback)
+
         if nom_lav == "SCONOSCIUTO":
             registra_file_processato(path_univoco)
             return None, False
