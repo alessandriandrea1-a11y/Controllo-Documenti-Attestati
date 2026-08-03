@@ -327,7 +327,7 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
     try:
         if img_base64:
             response = client.chat.completions.create(
-                model="llama-3.2-11b-vision-preview",
+                model="llama-3.2-11b-vision-instruct",
                 messages=[
                     {
                         "role": "user",
@@ -342,7 +342,7 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
         else:
             prompt_user = f"Nome del File: {nome_file}\nTesto Estratto:\n{testo_estratto}"
             response = client.chat.completions.create(
-                model="llama-3.1-8b-instant",
+                model="llama-3.3-70b-versatile",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt_user}
