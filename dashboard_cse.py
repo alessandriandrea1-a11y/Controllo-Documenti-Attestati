@@ -247,7 +247,7 @@ def stima_anni_validita_da_tipo(tipo_documento):
     for chiave, anni in DURATA_CORSI_ANNI.items():
         if chiave in doc_lower:
             return anni
-    return 5  # Valore predefinito D.Lgs 81/08
+    return 5
 
 def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita, tipo_documento=""):
     fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
@@ -269,7 +269,6 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
 
     data_finale = None
 
-    # 1. Se c'è una data di scadenza esplicita
     if data_scad_str and data_scad_str != "NON_PRESENTI":
         for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
             try:
@@ -278,7 +277,6 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
             except ValueError:
                 pass
 
-    # 2. Se manca la data di scadenza esplicita, calcolala dalla data di fine corso/emissione
     if not data_finale and data_emissione_str and data_emissione_str != "NON_PRESENTI":
         if not anni_validita or int(anni_validita) <= 0:
             anni_validita = stima_anni_validita_da_tipo(tipo_documento)
@@ -361,10 +359,10 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
 """
 
     try:
+        # Utilizza il modello stabile llama-3.3-70b-versatile per tutte le elaborazioni
         if img_base64:
-            # Utilizza il modello Vision attivo su Groq
             response = client.chat.completions.create(
-                model="llama-3.2-90b-vision-preview",
+                model="llama-3.3-70b-versatile",
                 messages=[
                     {
                         "role": "user",
@@ -874,7 +872,6 @@ if azienda_selezionata:
             stato = row["Stato Idoneità Cantiere"]
             prescr = row["Prescrizioni Sanitarie"]
 
-            # Recupera documenti e calcola il numero di attestati
             with get_db_connection() as conn:
                 df_docs = pd.read_sql_query("""
                     SELECT id, tipo_documento AS [Documento], stato_scadenza AS [Stato], 
