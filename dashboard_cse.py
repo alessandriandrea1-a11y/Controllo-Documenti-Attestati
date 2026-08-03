@@ -247,7 +247,7 @@ def stima_anni_validita_da_tipo(tipo_documento):
     for chiave, anni in DURATA_CORSI_ANNI.items():
         if chiave in doc_lower:
             return anni
-    return 5  # Valore predefinito per la maggior parte dei corsi D.Lgs 81/08
+    return 5  # Valore predefinito D.Lgs 81/08
 
 def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita, tipo_documento=""):
     fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
@@ -362,9 +362,9 @@ Restituisci ESCLUSIVAMENTE un JSON con questo schema:
 
     try:
         if img_base64:
-            # Uilizza il modello Vision di Groq attualmente supportato
+            # Utilizza il modello Vision attivo su Groq
             response = client.chat.completions.create(
-                model="llama-3.2-11b-vision-preview",
+                model="llama-3.2-90b-vision-preview",
                 messages=[
                     {
                         "role": "user",
