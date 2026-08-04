@@ -117,6 +117,11 @@ def get_dropbox_client():
 
     return None
 
+def get_db_connection():
+    conn = sqlite3.connect(DB_FILE_NAME, timeout=30)
+    conn.execute("PRAGMA synchronous = NORMAL;")
+    return conn
+
 def download_db_from_dropbox():
     dbx = get_dropbox_client()
     if dbx:
@@ -124,6 +129,14 @@ def download_db_from_dropbox():
             metadata, res = dbx.files_download(f"/{DB_FILE_NAME}")
             with open(DB_FILE_NAME, "wb") as f:
                 f.write(res.content)
+            
+            # Sblocca il DB converte WAL in DELETE se necessario
+            try:
+                temp_conn = sqlite3.connect(DB_FILE_NAME)
+                temp_conn.execute("PRAGMA journal_mode=DELETE;")
+                temp_conn.close()
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -136,12 +149,8 @@ def upload_db_to_dropbox():
         except Exception as e:
             st.error(f"⚠️ Errore nel salvataggio su Dropbox: {e}")
 
+# Download database all'avvio
 download_db_from_dropbox()
-
-def get_db_connection():
-    conn = sqlite3.connect(DB_FILE_NAME, timeout=30)
-    conn.execute("PRAGMA journal_mode=DELETE;")
-    return conn
 
 def inizializza_db():
     with get_db_connection() as conn:
