@@ -140,7 +140,7 @@ download_db_from_dropbox()
 
 def get_db_connection():
     conn = sqlite3.connect(DB_FILE_NAME, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA journal_mode=DELETE;")
     return conn
 
 def inizializza_db():
@@ -306,7 +306,6 @@ def unifica_tutti_i_duplicati_azienda(azienda_nome):
             else:
                 target_id = gruppi[key]
                 
-                # 1. Elimina i documenti duplicati dal profilo secondario per evitare crash di vincolo DB
                 cursor.execute("""
                     DELETE FROM documenti_lavoratori
                     WHERE lavoratore_id = ?
@@ -317,10 +316,7 @@ def unifica_tutti_i_duplicati_azienda(azienda_nome):
                       )
                 """, (op_id, target_id))
 
-                # 2. Trasferisce i rimanenti documenti al lavoratore principale
                 cursor.execute("UPDATE documenti_lavoratori SET lavoratore_id = ? WHERE lavoratore_id = ?", (target_id, op_id))
-                
-                # 3. Cancella la scheda duplicata
                 cursor.execute("DELETE FROM lavoratori WHERE id = ?", (op_id,))
                 
                 unificati_conteggio += 1
@@ -374,7 +370,6 @@ def stima_anni_validita_da_tipo(tipo_documento):
 def calcola_stato_da_stringa_data(data_scad_str, tipo_documento=""):
     doc_lower = (tipo_documento or "").lower()
     
-    # --- RIGIDO FIX: DPI E DOCUMENTI SENZA SCADENZA SUL PERSONALE ---
     parole_senza_scadenza = ["dpi", "consegna dpi", "dispositivi", "tesserino", "badge", "riconoscimento", "unilav (tempo indeterminato)", "indeterminato"]
     if any(k in doc_lower for k in parole_senza_scadenza):
         data_mostrata = f"Consegnati ({data_scad_str})" if (data_scad_str and data_scad_str not in ["Da Verificare", "NON_PRESENTI", "Tempo Indeterminato"]) else "Tempo Indeterminato"
