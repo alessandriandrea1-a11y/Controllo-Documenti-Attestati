@@ -293,10 +293,8 @@ def aggiorna_stato_generale_lavoratore(lavoratore_id, conn_esistente=None):
             conn.commit()
 
 
-
-
 def aggiungi_lavoratore_manuale(azienda, nome_completo):
-    """Inserisce un dipendente usando la struttura esatta del database (nominativo, azienda_id/azienda)."""
+    """Inserisce un dipendente garantendo la compatibilità con le query della tabella principale."""
     nome_clean = nome_completo.strip().upper()
     azienda_clean = azienda.strip().upper()
     
@@ -306,41 +304,38 @@ def aggiungi_lavoratore_manuale(azienda, nome_completo):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         
-        # 1. Se azienda è un ID o un testo, gestiamo l'associazione dinamica
+        # Legge le colonne reali della tabella
         cursor.execute("PRAGMA table_info(lavoratori)")
         colonne = [col[1] for col in cursor.fetchall()]
         
-        # Se 'azienda_id' è la colonna per la ditta
         col_azienda = "azienda_id" if "azienda_id" in colonne else ("azienda" if "azienda" in colonne else None)
         col_nome = "nominativo" if "nominativo" in colonne else ("nome_completo" if "nome_completo" in colonne else None)
         
-        if not col_azienda or not col_nome:
-            return False, f"Errore colonne DB. Trovate: {', '.join(colonne)}"
+        # 1. Controllo preventivo duplicati per questa specifica azienda
+        cursor.execute(
+            f"SELECT COUNT(*) FROM lavoratori WHERE UPPER({col_nome}) = ? AND UPPER({col_azienda}) = ?",
+            (nome_clean, azienda_clean)
+        )
+        if cursor.fetchone()[0] > 0:
+            return False, f"⚠️ L'operaio '{nome_clean}' è già presente per l'azienda '{azienda_clean}'."
 
-        # 2. Controllo preventivo duplicati
+        # 2. Inserimento dinamico compilando le colonne necessarie
         try:
-            cursor.execute(
-                f"SELECT COUNT(*) FROM lavoratori WHERE UPPER({col_nome}) = ?",
-                (nome_clean,)
-            )
-            if cursor.fetchone()[0] > 0:
-                return False, f"⚠️ L'operaio '{nome_clean}' è già presente nel database."
-        except Exception:
-            pass
-
-        # 3. Inserimento nei campi esatti del tuo database
-        try:
+            campi = [col_azienda, col_nome]
+            valori = [azienda_clean, nome_clean]
+            
             if "stato_scadenza_totale" in colonne:
-                cursor.execute(
-                    f"INSERT INTO lavoratori ({col_azienda}, {col_nome}, stato_scadenza_totale) VALUES (?, ?, ?)",
-                    (azienda_clean, nome_clean, "🔴 Nessun Documento")
-                )
-            else:
-                cursor.execute(
-                    f"INSERT INTO lavoratori ({col_azienda}, {col_nome}) VALUES (?, ?)",
-                    (azienda_clean, nome_clean)
-                )
+                campi.append("stato_scadenza_totale")
+                valori.append("🔴 Nessun Documento")
                 
+            if "mansione" in colonne:
+                campi.append("mansione")
+                valori.append("OPERAIO")  # Valore di default per evitare che rimanga NULL
+
+            placeholders = ", ".join(["?"] * len(campi))
+            nomi_campi = ", ".join(campi)
+            
+            cursor.execute(f"INSERT INTO lavoratori ({nomi_campi}) VALUES ({placeholders})", valori)
             conn.commit()
             return True, f"✅ Operaio '{nome_clean}' aggiunto con successo a '{azienda_clean}'!"
             
@@ -348,6 +343,9 @@ def aggiungi_lavoratore_manuale(azienda, nome_completo):
             return False, f"⚠️ L'operaio '{nome_clean}' esiste già nel sistema."
         except sqlite3.OperationalError as e:
             return False, f"Errore scrittura DB: {str(e)}"
+
+
+
 
 
 
@@ -1006,7 +1004,7 @@ if azienda_selezionata:
     if ha_permesso_modifica:
         with st.expander(f"➕ Aggiungi manualmente un nuovo dipendente a {azienda_selezionata}"):
             with st.form(key="form_nuovo_dipendente_manuale"):
-                nome_dipendente_input = st.text_input("Nome e Cognome Dipendente (es. ROSSI MARIO)")
+                nome_dipendente_input = st.text_input("Nome e Cognome Dipendente (es. PROETTO ANGELO)")
                 btn_salva = st.form_submit_button("💾 Salva Dipendente nel Database")
                 
                 if btn_salva:
@@ -1014,6 +1012,8 @@ if azienda_selezionata:
                         esito, msg = aggiungi_lavoratore_manuale(azienda_selezionata, nome_dipendente_input)
                         if esito:
                             st.success(msg)
+                            # Svuota la cache di Streamlit per forzare il ricaricamento dei dati aggiornati
+                            st.cache_data.clear()
                             if 'upload_db_to_dropbox' in globals():
                                 upload_db_to_dropbox()
                             st.rerun()
@@ -1021,6 +1021,8 @@ if azienda_selezionata:
                             st.error(msg)
                     else:
                         st.warning("Inserisci il nome e cognome del dipendente.")
+    
+
 
     
     # --- UNIFICAZIONE DUPLICATI ---
