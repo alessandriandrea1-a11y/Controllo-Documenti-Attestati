@@ -232,7 +232,7 @@ def pulisci_nome_rigido(nome_grezzo):
         
     return nome_pulito
 
-# --- FUNZIONE INTELLETUALE ANTI-DUPLICATI NOME/COGNOME ---
+# --- FUNZIONE INTELLEGENTE ANTI-DUPLICATI NOME/COGNOME ---
 def trova_o_crea_lavoratore(cursor, az_id, nom_lav, mans_lav, prescr):
     """
     Cerca un lavoratore esistente gestendo l'inversione Nome/Cognome.
@@ -257,8 +257,44 @@ def trova_o_crea_lavoratore(cursor, az_id, nom_lav, mans_lav, prescr):
     )
     return cursor.lastrowid
 
+def aggiorna_stato_generale_lavoratore(lavoratore_id, conn_esistente=None):
+    """
+    Aggiorna lo stato di un lavoratore. Accetta facoltativamente una connessione
+    già aperta per evitare il blocco del database (database is locked).
+    """
+    if conn_esistente:
+        cursor = conn_esistente.cursor()
+        cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (lavoratore_id,))
+        tutti_stati = [r[0] for r in cursor.fetchall()]
+        stringa_totale = "".join(tutti_stati)
+        
+        if "🔴" in stringa_totale or not tutti_stati:
+            nuovo_accesso = "🔴 INTERDETTO"
+        elif "🟡" in stringa_totale:
+            nuovo_accesso = "🟡 MONITORARE"
+        else:
+            nuovo_accesso = "🟢 ABILITATO"
+        
+        cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, lavoratore_id))
+    else:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (lavoratore_id,))
+            tutti_stati = [r[0] for r in cursor.fetchall()]
+            stringa_totale = "".join(tutti_stati)
+            
+            if "🔴" in stringa_totale or not tutti_stati:
+                nuovo_accesso = "🔴 INTERDETTO"
+            elif "🟡" in stringa_totale:
+                nuovo_accesso = "🟡 MONITORARE"
+            else:
+                nuovo_accesso = "🟢 ABILITATO"
+            
+            cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, lavoratore_id))
+            conn.commit()
+
 def unifica_tutti_i_duplicati_azienda(azienda_nome):
-    """Scansiona l'azienda ed elide i duplicati invertiti o con lo stesso nome."""
+    """Scansiona l'azienda ed elide i duplicati invertiti o con lo stesso nome in un'unica transazione."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_nome,))
@@ -272,6 +308,7 @@ def unifica_tutti_i_duplicati_azienda(azienda_nome):
         
         gruppi = {}
         unificati_conteggio = 0
+        lavoratori_da_aggiornare = set()
         
         for op_id, nom in lavoratori:
             key = frozenset(nom.upper().split())
@@ -284,11 +321,14 @@ def unifica_tutti_i_duplicati_azienda(azienda_nome):
                 # Elimina il duplicato
                 cursor.execute("DELETE FROM lavoratori WHERE id = ?", (op_id,))
                 unificati_conteggio += 1
-                
-                # Ricalcola stato
-                aggiorna_stato_generale_lavoratore(target_id)
+                lavoratori_da_aggiornare.add(target_id)
+        
+        # Aggiorna lo stato di tutti i lavoratori unificati usando la stessa connessione attiva
+        for target_id in lavoratori_da_aggiornare:
+            aggiorna_stato_generale_lavoratore(target_id, conn_esistente=conn)
                 
         conn.commit()
+        
     upload_db_to_dropbox()
     return unificati_conteggio
 
@@ -305,23 +345,6 @@ def normalizza_nome_documento(tipo_doc, testo_estratto=""):
             return "UNILAV (Tempo Indeterminato)"
             
     return tipo_doc.strip().title()
-
-def aggiorna_stato_generale_lavoratore(lavoratore_id):
-    with get_db_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (lavoratore_id,))
-        tutti_stati = [r[0] for r in cursor.fetchall()]
-        stringa_totale = "".join(tutti_stati)
-        
-        if "🔴" in stringa_totale or not tutti_stati:
-            nuovo_accesso = "🔴 INTERDETTO"
-        elif "🟡" in stringa_totale:
-            nuovo_accesso = "🟡 MONITORARE"
-        else:
-            nuovo_accesso = "🟢 ABILITATO"
-        
-        cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, lavoratore_id))
-        conn.commit()
 
 def estrai_pagine_da_pdf(file_bytes):
     pagine_estratte = []
