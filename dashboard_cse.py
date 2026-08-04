@@ -292,8 +292,11 @@ def aggiorna_stato_generale_lavoratore(lavoratore_id, conn_esistente=None):
             cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, lavoratore_id))
             conn.commit()
 
+
+
+
 def aggiungi_lavoratore_manuale(azienda, nome_completo):
-    """Inserisce un dipendente rilevando automaticamente la struttura del database."""
+    """Inserisce un dipendente usando la struttura esatta del database (nominativo, azienda_id/azienda)."""
     nome_clean = nome_completo.strip().upper()
     azienda_clean = azienda.strip().upper()
     
@@ -303,58 +306,38 @@ def aggiungi_lavoratore_manuale(azienda, nome_completo):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         
-        # 1. Trova il nome reale della tabella (lavoratori, dipendenti, anagrafica, ecc.)
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        tabelle = [row[0] for row in cursor.fetchall()]
+        # 1. Se azienda è un ID o un testo, gestiamo l'associazione dinamica
+        cursor.execute("PRAGMA table_info(lavoratori)")
+        colonne = [col[1] for col in cursor.fetchall()]
         
-        tabella_target = None
-        for t in ["lavoratori", "dipendenti", "lavoratore", "anagrafica"]:
-            if t in tabelle:
-                tabella_target = t
-                break
+        # Se 'azienda_id' è la colonna per la ditta
+        col_azienda = "azienda_id" if "azienda_id" in colonne else ("azienda" if "azienda" in colonne else None)
+        col_nome = "nominativo" if "nominativo" in colonne else ("nome_completo" if "nome_completo" in colonne else None)
         
-        # Se non trova nomi standard, prende la prima tabella disponibile che non sia di sistema
-        if not tabella_target:
-            tabelle_valide = [t for t in tabelle if not t.startswith('sqlite_')]
-            if tabelle_valide:
-                tabella_target = tabelle_valide[0]
-            else:
-                return False, "Errore DB: Nessuna tabella trovata nel database."
-
-        # 2. Mappa i nomi reali delle colonne presenti nella tabella
-        cursor.execute(f"PRAGMA table_info({tabella_target})")
-        colonne = [col[1].lower() for col in cursor.fetchall()]
-        colonne_originali = [col[1] for col in cursor.fetchall()] # mantiene il casing originale
-        
-        # Individua la colonna per l'azienda
-        col_azienda = next((c for c in colonne if "azienda" in c or "ditta" in c or "societa" in c), None)
-        # Individua la colonna per il nome
-        col_nome = next((c for c in colonne if "nome" in c or "dipendente" in c or "lavoratore" in c), None)
-
         if not col_azienda or not col_nome:
-            return False, f"Impossibile identificare le colonne nel DB. Colonne trovate: {', '.join(colonne)}"
+            return False, f"Errore colonne DB. Trovate: {', '.join(colonne)}"
 
-        # 3. Controllo preventivo duplicati
+        # 2. Controllo preventivo duplicati
         try:
             cursor.execute(
-                f"SELECT COUNT(*) FROM {tabella_target} WHERE UPPER({col_azienda}) = ? AND UPPER({col_nome}) = ?",
-                (azienda_clean, nome_clean)
+                f"SELECT COUNT(*) FROM lavoratori WHERE UPPER({col_nome}) = ?",
+                (nome_clean,)
             )
             if cursor.fetchone()[0] > 0:
-                return False, f"⚠️ L'operaio '{nome_clean}' è già presente per l'azienda '{azienda_clean}'."
+                return False, f"⚠️ L'operaio '{nome_clean}' è già presente nel database."
         except Exception:
-            pass # Se fallisce la verifica previa, prosegue tentativamente con l'inserimento
+            pass
 
-        # 4. Inserimento dinamico
+        # 3. Inserimento nei campi esatti del tuo database
         try:
             if "stato_scadenza_totale" in colonne:
                 cursor.execute(
-                    f"INSERT INTO {tabella_target} ({col_azienda}, {col_nome}, stato_scadenza_totale) VALUES (?, ?, ?)",
+                    f"INSERT INTO lavoratori ({col_azienda}, {col_nome}, stato_scadenza_totale) VALUES (?, ?, ?)",
                     (azienda_clean, nome_clean, "🔴 Nessun Documento")
                 )
             else:
                 cursor.execute(
-                    f"INSERT INTO {tabella_target} ({col_azienda}, {col_nome}) VALUES (?, ?)",
+                    f"INSERT INTO lavoratori ({col_azienda}, {col_nome}) VALUES (?, ?)",
                     (azienda_clean, nome_clean)
                 )
                 
@@ -364,10 +347,7 @@ def aggiungi_lavoratore_manuale(azienda, nome_completo):
         except sqlite3.IntegrityError:
             return False, f"⚠️ L'operaio '{nome_clean}' esiste già nel sistema."
         except sqlite3.OperationalError as e:
-            return False, f"Errore scrittura DB ({tabella_target}): {str(e)}"
-
-
-
+            return False, f"Errore scrittura DB: {str(e)}"
 
 
 
