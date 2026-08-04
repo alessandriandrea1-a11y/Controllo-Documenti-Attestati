@@ -981,19 +981,6 @@ if azienda_selezionata:
                     else:
                         st.warning("Inserisci il nome e cognome del dipendente.")
 
-    # --- UNIFICAZIONE DUPLICATI ---
-    if ha_permesso_modifica:
-        col_unif1, col_unif2 = st.columns([3, 1])
-        with col_unif1:
-            st.info("💡 **Hai duplicati nella lista?** Se `MARIO ROSSI` e `ROSSI MARIO` figurano separate, usa questo pulsante per unire immediatamente le schede mantenendo tutti i documenti presi dalle varie scansioni.")
-        with col_unif2:
-            if st.button("🔄 UNIFICA DUPLICATI"):
-                num_unificati = unifica_tutti_i_duplicati_azienda(azienda_selezionata)
-                if num_unificati > 0:
-                    st.success(f"⚡ Unificazione completata! {num_unificati} duplicati sono stati accorpati.")
-                    st.rerun()
-                else:
-                    st.info("Nessun duplicato rilevato da unificare.")
     
     # --- UNIFICAZIONE DUPLICATI ---
     if ha_permesso_modifica:
