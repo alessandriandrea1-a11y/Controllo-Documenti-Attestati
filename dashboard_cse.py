@@ -293,11 +293,8 @@ def aggiorna_stato_generale_lavoratore(lavoratore_id, conn_esistente=None):
             conn.commit()
 
 
-
-
-
 def aggiungi_lavoratore_manuale(azienda, nome_completo):
-    """Inserisce o aggiorna un dipendente associandolo alla corretta azienda nel DB."""
+    """Inserisce un dipendente associandolo all'ID numerico reale dell'azienda."""
     nome_clean = nome_completo.strip().upper()
     azienda_clean = azienda.strip().upper()
     
@@ -310,11 +307,10 @@ def aggiungi_lavoratore_manuale(azienda, nome_completo):
         # 1. Recupera la struttura della tabella lavoratori
         cursor.execute("PRAGMA table_info(lavoratori)")
         colonne_lav = [col[1] for col in cursor.fetchall()]
-        
         col_az = "azienda_id" if "azienda_id" in colonne_lav else "azienda"
         col_nome = "nominativo" if "nominativo" in colonne_lav else "nome_completo"
 
-        # 2. Cerca l'ID o il valore esatto dell'azienda
+        # 2. Cerca l'ID numerico reale dell'azienda selezionata
         valore_azienda = azienda_clean
         try:
             cursor.execute("PRAGMA table_info(aziende)")
@@ -322,23 +318,24 @@ def aggiungi_lavoratore_manuale(azienda, nome_completo):
             col_nome_az = next((c for c in colonne_az if c in ['nome', 'ragione_sociale', 'denominazione', 'azienda']), None)
             
             if col_nome_az and "id" in colonne_az:
+                # Cerca l'ID numerico se l'azienda è registrata nella tabella aziende
                 cursor.execute(f"SELECT id FROM aziende WHERE UPPER({col_nome_az}) = ?", (azienda_clean,))
                 res = cursor.fetchone()
                 if res:
-                    valore_azienda = res[0]
+                    valore_azienda = res[0] # Usa l'ID (es. 5) invece del testo
         except Exception:
             pass
 
-        # 3. Se l'operaio esiste già (es. PROETTO ANGELO), aggiorna la sua associazione
+        # 3. Se l'operaio esiste già (es. PROETTO ANGELO), aggiorna la sua azienda con l'ID corretto
         cursor.execute(f"SELECT id FROM lavoratori WHERE UPPER({col_nome}) = ?", (nome_clean,))
         esistente = cursor.fetchone()
         
         if esistente:
             cursor.execute(f"UPDATE lavoratori SET {col_az} = ? WHERE UPPER({col_nome}) = ?", (valore_azienda, nome_clean))
             conn.commit()
-            return True, f"✅ Operaio '{nome_clean}' aggiornato e associato con successo!"
+            return True, f"✅ Operaio '{nome_clean}' aggiornato e collegato a '{azienda_clean}'!"
 
-        # 4. Altrimenti inserisci da zero
+        # 4. Inserimento ex-novo
         try:
             campi = [col_az, col_nome]
             valori = [valore_azienda, nome_clean]
@@ -355,9 +352,12 @@ def aggiungi_lavoratore_manuale(azienda, nome_completo):
             
             cursor.execute(f"INSERT INTO lavoratori ({nomi_campi}) VALUES ({placeholders})", valori)
             conn.commit()
-            return True, f"✅ Operaio '{nome_clean}' aggiunto con successo a '{azienda_clean}'!"
+            return True, f"✅ Operaio '{nome_clean}' aggiunto con successo!"
         except Exception as e:
             return False, f"Errore salvataggio: {str(e)}"
+
+
+
 
 
 
