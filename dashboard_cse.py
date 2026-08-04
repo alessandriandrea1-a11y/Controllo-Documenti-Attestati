@@ -232,12 +232,7 @@ def pulisci_nome_rigido(nome_grezzo):
         
     return nome_pulito
 
-# --- FUNZIONE INTELLEGENTE ANTI-DUPLICATI NOME/COGNOME ---
 def trova_o_crea_lavoratore(cursor, az_id, nom_lav, mans_lav, prescr):
-    """
-    Cerca un lavoratore esistente gestendo l'inversione Nome/Cognome.
-    Esempio: "MARIO ROSSI" matcha perfettamente con "ROSSI MARIO".
-    """
     tokens_nuovi = set(nom_lav.split())
     
     cursor.execute("SELECT id, nominativo FROM lavoratori WHERE azienda_id = ?", (az_id,))
@@ -250,7 +245,6 @@ def trova_o_crea_lavoratore(cursor, az_id, nom_lav, mans_lav, prescr):
                 cursor.execute("UPDATE lavoratori SET prescrizioni_mediche = ? WHERE id = ?", (prescr, op_id))
             return op_id
 
-    # Se non trovato con tokens invertiti, inserisci il nuovo dipendente
     cursor.execute(
         "INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche) VALUES (?, ?, ?, '🔴 Da Verificare', ?)", 
         (az_id, nom_lav, mans_lav, prescr)
@@ -258,10 +252,6 @@ def trova_o_crea_lavoratore(cursor, az_id, nom_lav, mans_lav, prescr):
     return cursor.lastrowid
 
 def aggiorna_stato_generale_lavoratore(lavoratore_id, conn_esistente=None):
-    """
-    Aggiorna lo stato di un lavoratore. Accetta facoltativamente una connessione
-    già aperta per evitare il blocco del database (database is locked).
-    """
     if conn_esistente:
         cursor = conn_esistente.cursor()
         cursor.execute("SELECT stato_scadenza FROM documenti_lavoratori WHERE lavoratore_id = ?", (lavoratore_id,))
@@ -294,7 +284,6 @@ def aggiorna_stato_generale_lavoratore(lavoratore_id, conn_esistente=None):
             conn.commit()
 
 def unifica_tutti_i_duplicati_azienda(azienda_nome):
-    """Scansiona l'azienda ed elide i duplicati invertiti o con lo stesso nome in un'unica transazione."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_nome,))
@@ -316,14 +305,27 @@ def unifica_tutti_i_duplicati_azienda(azienda_nome):
                 gruppi[key] = op_id
             else:
                 target_id = gruppi[key]
-                # Sposta i documenti al lavoratore principale
+                
+                # 1. Elimina i documenti duplicati dal profilo secondario per evitare crash di vincolo DB
+                cursor.execute("""
+                    DELETE FROM documenti_lavoratori
+                    WHERE lavoratore_id = ?
+                      AND UPPER(tipo_documento) IN (
+                          SELECT UPPER(tipo_documento) 
+                          FROM documenti_lavoratori 
+                          WHERE lavoratore_id = ?
+                      )
+                """, (op_id, target_id))
+
+                # 2. Trasferisce i rimanenti documenti al lavoratore principale
                 cursor.execute("UPDATE documenti_lavoratori SET lavoratore_id = ? WHERE lavoratore_id = ?", (target_id, op_id))
-                # Elimina il duplicato
+                
+                # 3. Cancella la scheda duplicata
                 cursor.execute("DELETE FROM lavoratori WHERE id = ?", (op_id,))
+                
                 unificati_conteggio += 1
                 lavoratori_da_aggiornare.add(target_id)
         
-        # Aggiorna lo stato di tutti i lavoratori unificati usando la stessa connessione attiva
         for target_id in lavoratori_da_aggiornare:
             aggiorna_stato_generale_lavoratore(target_id, conn_esistente=conn)
                 
@@ -369,14 +371,22 @@ def stima_anni_validita_da_tipo(tipo_documento):
             return anni
     return 5
 
-def calcola_stato_da_stringa_data(data_scad_str):
+def calcola_stato_da_stringa_data(data_scad_str, tipo_documento=""):
+    doc_lower = (tipo_documento or "").lower()
+    
+    # --- RIGIDO FIX: DPI E DOCUMENTI SENZA SCADENZA SUL PERSONALE ---
+    parole_senza_scadenza = ["dpi", "consegna dpi", "dispositivi", "tesserino", "badge", "riconoscimento", "unilav (tempo indeterminato)", "indeterminato"]
+    if any(k in doc_lower for k in parole_senza_scadenza):
+        data_mostrata = f"Consegnati ({data_scad_str})" if (data_scad_str and data_scad_str not in ["Da Verificare", "NON_PRESENTI", "Tempo Indeterminato"]) else "Tempo Indeterminato"
+        return data_mostrata, "🟢 In Regola"
+
     if not data_scad_str or data_scad_str in ["Da Verificare", "NON_PRESENTI"]:
         return "Da Verificare", "🟡 In Scadenza"
 
     data_pulita = str(data_scad_str).strip()
     data_lower = data_pulita.lower()
 
-    if any(k in data_lower for k in ["indeterminato", "t.i.", "tempo indeterminato", "illimitata", "presente"]):
+    if any(k in data_lower for k in ["indeterminato", "t.i.", "tempo indeterminato", "illimitata", "presente", "consegnato", "consegnati"]):
         return "Tempo Indeterminato", "🟢 In Regola"
 
     fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
@@ -407,11 +417,12 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
     doc_lower = (tipo_documento or "").lower()
     testo_lower = (testo_estratto or "").lower()
     
-    is_senza_scadenza = any(termine in doc_lower for termine in ["tesserino", "badge", "riconoscimento", "dpi", "consegna", "dispositivi", "unilav (tempo indeterminato)", "indeterminato"])
+    is_senza_scadenza = any(termine in doc_lower for termine in ["dpi", "consegna dpi", "dispositivi", "tesserino", "badge", "riconoscimento", "unilav (tempo indeterminato)", "indeterminato"])
     is_unilav_indeterminato = "unilav" in doc_lower and ("indeterminato" in doc_lower or "t.i." in doc_lower or "tempo indeterminato" in testo_lower or "a tempo indeterminato" in testo_lower)
 
     if is_senza_scadenza or is_unilav_indeterminato:
-        return "Tempo Indeterminato", "🟢 In Regola"
+        data_notazione = f"Consegnati ({data_emissione_str})" if (data_emissione_str and data_emissione_str != "NON_PRESENTI") else "Tempo Indeterminato"
+        return data_notazione, "🟢 In Regola"
 
     data_finale_str = data_scad_str
 
@@ -428,7 +439,7 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
             except Exception:
                 pass
 
-    return calcola_stato_da_stringa_data(data_finale_str)
+    return calcola_stato_da_stringa_data(data_finale_str, tipo_documento=tipo_documento)
 
 def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
     nome_lower = nome_file.lower()
@@ -456,7 +467,7 @@ def _esegui_chiamata_ai_e_salvataggio(testo_estratto, nome_file, path_univoco, c
     lavoratore_fallback = estrai_nome_lavoratore_da_percorso(path_univoco)
     
     system_prompt = f"""Sei un esperto verificatore di documenti di cantiere (CSE).
-Analizza il documento e determina SE E SOLO SE si tratta di un documento INDIVIDUALE di un LAVORATORE (Es. Attestato corso, Idoneità Medica, UNILAV, Tesserino).
+Analizza il documento e determina SE E SOLO SE si tratta di un documento INDIVIDUALE di un LAVORATORE (Es. Attestato corso, Idoneità Medica, UNILAV, Tesserino, Consegna DPI).
 
 REGOLE RIGIDE:
 1. Se il documento è aziendale (POS, DURC, Fattura, Contratto, Scheda Mezzo/Macchinario, Verbale), imposta "documento_pertinente": false.
@@ -529,7 +540,6 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
             if az_row:
                 az_id = az_row[0]
                 
-                # RICERCA INTELLIGENTE ANTI-INVERSIONE NOME/COGNOME
                 op_id = trova_o_crea_lavoratore(cursor, az_id, nom_lav, mans_lav, prescr)
                 
                 cursor.execute("SELECT id FROM documenti_lavoratori WHERE lavoratore_id = ? AND UPPER(tipo_documento) = ?", (op_id, doc_nome.upper()))
@@ -541,13 +551,13 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
                         SET stato_scadenza = ?, data_scadenza = ?, nome_file_origine = ?
                         WHERE id = ?
                     """, (stato_calc, data_scad, nome_file, doc_esistente[0]))
-                    msg_esito = f"🔄 Aggiornato: {doc_nome} ({nom_lav}) -> Scadenza: {data_scad}"
+                    msg_esito = f"🔄 Aggiornato: {doc_nome} ({nom_lav}) -> Stato: {data_scad}"
                 else:
                     cursor.execute("""
                         INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza, nome_file_origine)
                         VALUES (?, ?, ?, ?, ?)
                     """, (op_id, doc_nome, stato_calc, data_scad, nome_file))
-                    msg_esito = f"✨ Registrato: {doc_nome} ({nom_lav}) -> Scadenza: {data_scad}"
+                    msg_esito = f"✨ Registrato: {doc_nome} ({nom_lav}) -> Stato: {data_scad}"
                     
                 conn.commit()
 
@@ -927,7 +937,7 @@ if azienda_selezionata:
 
     st.write("---")
     
-    # --- BARRA UTIS: PULIZIA E UNIFICAZIONE DUPLICATI ---
+    # --- UNIFICAZIONE DUPLICATI ---
     if ha_permesso_modifica:
         col_unif1, col_unif2 = st.columns([3, 1])
         with col_unif1:
@@ -941,7 +951,7 @@ if azienda_selezionata:
                 else:
                     st.info("Nessun duplicato rilevato da unificare.")
 
-    # --- VISUALIZZAZIONE TABELLARE LAVORATORI ED EDITING ---
+    # --- TABELLA LAVORATORI ED EDITING ---
     with get_db_connection() as conn:
         df_lavoratori = pd.read_sql_query("""
             SELECT l.id, l.nominativo, l.mansione, l.stato_scadenza_totale, l.prescrizioni_mediche 
@@ -996,20 +1006,26 @@ if azienda_selezionata:
                     
                     c_edit1, c_edit2 = st.columns(2)
                     with c_edit1:
-                        st.markdown("**Modifica / Aggiorna Documento Esistente:**")
+                        st.markdown("**Modifica / Elimina Singolo Documento:**")
                         if not df_docs.empty:
-                            materia_opzioni = {f"{r['tipo_documento']} (Scad: {r['data_scadenza']})": r['id'] for _, r in df_docs.iterrows()}
-                            doc_sel_label = st.selectbox("Seleziona documento da modificare:", list(materia_opzioni.keys()), key=f"sel_doc_{lav_id}")
+                            materia_opzioni = {f"{r['tipo_documento']} ({r['data_scadenza']})": r['id'] for _, r in df_docs.iterrows()}
+                            doc_sel_label = st.selectbox("Seleziona documento da gestire:", list(materia_opzioni.keys()), key=f"sel_doc_{lav_id}")
                             doc_id_selezionato = materia_opzioni[doc_sel_label]
                             
                             doc_row = df_docs[df_docs['id'] == doc_id_selezionato].iloc[0]
                             
                             with st.form(key=f"form_modifica_{doc_id_selezionato}"):
                                 nuovo_nome_doc = st.text_input("Tipo Documento:", value=doc_row['tipo_documento'])
-                                nuova_data_scad = st.text_input("Data Scadenza (GG/MM/AAAA, 'Tempo Indeterminato' o T.I.):", value=str(doc_row['data_scadenza']))
+                                nuova_data_scad = st.text_input("Data Scadenza / Note (GG/MM/AAAA o Tempo Indeterminato):", value=str(doc_row['data_scadenza']))
                                 
-                                if st.form_submit_button("💾 Salva Modifiche Documento"):
-                                    data_scad_calc, nuovo_stato = calcola_stato_da_stringa_data(nuova_data_scad.strip())
+                                col_btn_salva, col_btn_del = st.columns(2)
+                                with col_btn_salva:
+                                    btn_salva_modifica = st.form_submit_button("💾 Salva Modifiche")
+                                with col_btn_del:
+                                    btn_elimina_singolo_doc = st.form_submit_button("🗑️ Elimina Solo Questo Documento")
+                                
+                                if btn_salva_modifica:
+                                    data_scad_calc, nuovo_stato = calcola_stato_da_stringa_data(nuova_data_scad.strip(), tipo_documento=nuovo_nome_doc.strip())
                                     
                                     with get_db_connection() as conn:
                                         cursor = conn.cursor()
@@ -1025,15 +1041,26 @@ if azienda_selezionata:
                                     st.success("✅ Documento aggiornato correttamente!")
                                     st.rerun()
 
+                                if btn_elimina_singolo_doc:
+                                    with get_db_connection() as conn:
+                                        cursor = conn.cursor()
+                                        cursor.execute("DELETE FROM documenti_lavoratori WHERE id = ?", (doc_id_selezionato,))
+                                        conn.commit()
+                                    
+                                    aggiorna_stato_generale_lavoratore(lav_id)
+                                    upload_db_to_dropbox()
+                                    st.success("🗑️ Documento eliminato! Il dipendente è stato conservato.")
+                                    st.rerun()
+
                     with c_edit2:
                         st.markdown("**Aggiungi Nuovo Documento Manuale:**")
                         with st.form(key=f"form_nuovo_doc_{lav_id}"):
-                            nuovo_tipo = st.text_input("Nome Documento (es. UNILAV, Formazione Generica):")
-                            nuova_scad = st.text_input("Data Scadenza (es. 15/10/2027 o Tempo Indeterminato):")
+                            nuovo_tipo = st.text_input("Nome Documento (es. Consegna DPI, Formazione Generica):")
+                            nuova_scad = st.text_input("Data (es. 15/10/2026 o Tempo Indeterminato):")
                             
                             if st.form_submit_button("➕ Aggiungi Documento"):
                                 if nuovo_tipo.strip():
-                                    data_scad_calc, nuovo_stato = calcola_stato_da_stringa_data(nuova_scad.strip())
+                                    data_scad_calc, nuovo_stato = calcola_stato_da_stringa_data(nuova_scad.strip(), tipo_documento=nuovo_tipo.strip())
                                     with get_db_connection() as conn:
                                         cursor = conn.cursor()
                                         cursor.execute("""
