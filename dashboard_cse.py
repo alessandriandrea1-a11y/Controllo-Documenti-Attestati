@@ -292,6 +292,26 @@ def aggiorna_stato_generale_lavoratore(lavoratore_id, conn_esistente=None):
             cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, lavoratore_id))
             conn.commit()
 
+def aggiungi_lavoratore_manuale(azienda, nome_completo):
+    """Inserisce manualmente un dipendente nel database."""
+    nome_clean = nome_completo.strip()
+    azienda_clean = azienda.strip()
+    
+    if not nome_clean or not azienda_clean:
+        return False, "Nome dipendente e Azienda sono obbligatori."
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "INSERT INTO lavoratori (azienda, nome_completo, stato_scadenza_totale) VALUES (?, ?, ?)",
+                (azienda_clean, nome_clean, "🔴 Nessun Documento")
+            )
+            conn.commit()
+            return True, f"Dipendente '{nome_clean}' aggiunto con successo a '{azienda_clean}'."
+        except sqlite3.IntegrityError:
+            return False, f"Il dipendente '{nome_clean}' esiste già per l'azienda '{azienda_clean}'."
+
 def unifica_tutti_i_duplicati_azienda(azienda_nome):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -940,6 +960,40 @@ if azienda_selezionata:
                             st.warning("⚠️ Il documento caricato non è stato riconosciuto come attestato/documento personale di un lavoratore.")
 
     st.write("---")
+
+# --- INSERIMENTO MANUALE DIPENDENTE NELL'AZIENDA SELEZIONATA ---
+    if ha_permesso_modifica:
+        with st.expander(f"➕ Aggiungi manualmente un nuovo dipendente a {azienda_selezionata}"):
+            with st.form(key="form_nuovo_dipendente_manuale"):
+                nome_dipendente_input = st.text_input("Nome e Cognome Dipendente (es. ROSSI MARIO)")
+                btn_salva = st.form_submit_button("💾 Salva Dipendente nel Database")
+                
+                if btn_salva:
+                    if nome_dipendente_input:
+                        esito, msg = aggiungi_lavoratore_manuale(azienda_selezionata, nome_dipendente_input)
+                        if esito:
+                            st.success(msg)
+                            if 'upload_db_to_dropbox' in globals():
+                                upload_db_to_dropbox()
+                            st.rerun()
+                        else:
+                            st.error(msg)
+                    else:
+                        st.warning("Inserisci il nome e cognome del dipendente.")
+
+    # --- UNIFICAZIONE DUPLICATI ---
+    if ha_permesso_modifica:
+        col_unif1, col_unif2 = st.columns([3, 1])
+        with col_unif1:
+            st.info("💡 **Hai duplicati nella lista?** Se `MARIO ROSSI` e `ROSSI MARIO` figurano separate, usa questo pulsante per unire immediatamente le schede mantenendo tutti i documenti presi dalle varie scansioni.")
+        with col_unif2:
+            if st.button("🔄 UNIFICA DUPLICATI"):
+                num_unificati = unifica_tutti_i_duplicati_azienda(azienda_selezionata)
+                if num_unificati > 0:
+                    st.success(f"⚡ Unificazione completata! {num_unificati} duplicati sono stati accorpati.")
+                    st.rerun()
+                else:
+                    st.info("Nessun duplicato rilevato da unificare.")
     
     # --- UNIFICAZIONE DUPLICATI ---
     if ha_permesso_modifica:
