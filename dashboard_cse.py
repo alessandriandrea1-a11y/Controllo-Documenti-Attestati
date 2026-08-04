@@ -48,7 +48,6 @@ DURATA_CORSI_ANNI = {
     "rls": 1
 }
 
-# Parole chiave che indicano file AZIENDALI / NON RIFERITI A SINGOLI DIPENDENTI
 PAROLE_DA_SCARTARE_ASSOLUTE = [
     "pos", "p.o.s", "piano operativo", "fattura", "fatture", "preventivo", 
     "ordine", "ddt", "bolla", "contabilita", "estratto", "pagamento", 
@@ -224,7 +223,6 @@ def pulisci_nome_rigido(nome_grezzo):
     nome = re.sub(r'[-–—]', ' ', nome)
     nome_pulito = re.sub(r'\s+', ' ', nome).strip().upper()
     
-    # Se il nome estratto è "SCONOSCIUTO" o troppo corto o contiene numeri/ditte, scarta
     if len(nome_pulito) <= 3 or any(char.isdigit() for char in nome_pulito):
         return "SCONOSCIUTO"
         
@@ -233,6 +231,66 @@ def pulisci_nome_rigido(nome_grezzo):
         return "SCONOSCIUTO"
         
     return nome_pulito
+
+# --- FUNZIONE INTELLETUALE ANTI-DUPLICATI NOME/COGNOME ---
+def trova_o_crea_lavoratore(cursor, az_id, nom_lav, mans_lav, prescr):
+    """
+    Cerca un lavoratore esistente gestendo l'inversione Nome/Cognome.
+    Esempio: "MARIO ROSSI" matcha perfettamente con "ROSSI MARIO".
+    """
+    tokens_nuovi = set(nom_lav.split())
+    
+    cursor.execute("SELECT id, nominativo FROM lavoratori WHERE azienda_id = ?", (az_id,))
+    lavoratori_esistenti = cursor.fetchall()
+    
+    for op_id, nom_db in lavoratori_esistenti:
+        tokens_db = set(nom_db.upper().split())
+        if tokens_nuovi == tokens_db:
+            if prescr != 'Nessuna prescrizione rilevata':
+                cursor.execute("UPDATE lavoratori SET prescrizioni_mediche = ? WHERE id = ?", (prescr, op_id))
+            return op_id
+
+    # Se non trovato con tokens invertiti, inserisci il nuovo dipendente
+    cursor.execute(
+        "INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche) VALUES (?, ?, ?, '🔴 Da Verificare', ?)", 
+        (az_id, nom_lav, mans_lav, prescr)
+    )
+    return cursor.lastrowid
+
+def unifica_tutti_i_duplicati_azienda(azienda_nome):
+    """Scansiona l'azienda ed elide i duplicati invertiti o con lo stesso nome."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM aziende WHERE nome = ?", (azienda_nome,))
+        az_row = cursor.fetchone()
+        if not az_row:
+            return 0
+        az_id = az_row[0]
+        
+        cursor.execute("SELECT id, nominativo FROM lavoratori WHERE azienda_id = ? ORDER BY id ASC", (az_id,))
+        lavoratori = cursor.fetchall()
+        
+        gruppi = {}
+        unificati_conteggio = 0
+        
+        for op_id, nom in lavoratori:
+            key = frozenset(nom.upper().split())
+            if key not in gruppi:
+                gruppi[key] = op_id
+            else:
+                target_id = gruppi[key]
+                # Sposta i documenti al lavoratore principale
+                cursor.execute("UPDATE documenti_lavoratori SET lavoratore_id = ? WHERE lavoratore_id = ?", (target_id, op_id))
+                # Elimina il duplicato
+                cursor.execute("DELETE FROM lavoratori WHERE id = ?", (op_id,))
+                unificati_conteggio += 1
+                
+                # Ricalcola stato
+                aggiorna_stato_generale_lavoratore(target_id)
+                
+        conn.commit()
+    upload_db_to_dropbox()
+    return unificati_conteggio
 
 def normalizza_nome_documento(tipo_doc, testo_estratto=""):
     t = (tipo_doc or "").upper().strip()
@@ -350,14 +408,10 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
     return calcola_stato_da_stringa_data(data_finale_str)
 
 def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
-    """Filtro di pertinenza: accetta SOLO se si tratta di un documento relativo a un dipendente."""
     nome_lower = nome_file.lower()
-    
-    # 1. Scarto immediato file aziendali
     if any(p in nome_lower for p in PAROLE_DA_SCARTARE_ASSOLUTE):
         return False
 
-    # 2. Parole chiave indispensabili (attestati/idoneità/documenti lavoratore)
     parole_chiave_personale = [
         "attestato", "formazione", "corso", "idoneità", "idoneita", 
         "visita", "medica", "medico", "lavoratore", "preposto", "dirigente", "antincendio", 
@@ -413,7 +467,6 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
         contenuto_risposta = response.choices[0].message.content
         dati_ai = json.loads(contenuto_risposta)
 
-        # SE L'AI DICE CHE NON È UN DOCUMENTO DIPENDENTE -> SCARTA E NON SALVARE NULLA!
         if not dati_ai.get("documento_pertinente", False):
             registra_file_processato(path_univoco)
             return None, False
@@ -423,7 +476,6 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
         if nom_lav == "SCONOSCIUTO" and lavoratore_fallback:
             nom_lav = pulisci_nome_rigido(lavoratore_fallback)
 
-        # Se ancora non abbiamo un nome di persona reale, scarta categoricamente
         if nom_lav == "SCONOSCIUTO":
             registra_file_processato(path_univoco)
             return None, False
@@ -453,16 +505,9 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
             az_row = cursor.fetchone()
             if az_row:
                 az_id = az_row[0]
-                cursor.execute("SELECT id FROM lavoratori WHERE azienda_id = ? AND UPPER(nominativo) = ?", (az_id, nom_lav))
-                operaio_db = cursor.fetchone()
                 
-                if operaio_db:
-                    op_id = operaio_db[0]
-                    if prescr != 'Nessuna prescrizione rilevata':
-                        cursor.execute("UPDATE lavoratori SET prescrizioni_mediche = ? WHERE id = ?", (prescr, op_id))
-                else:
-                    cursor.execute("INSERT INTO lavoratori (azienda_id, nominativo, mansione, stato_scadenza_totale, prescrizioni_mediche) VALUES (?, ?, ?, '🔴 Da Verificare', ?)", (az_id, nom_lav, mans_lav, prescr))
-                    op_id = cursor.lastrowid
+                # RICERCA INTELLIGENTE ANTI-INVERSIONE NOME/COGNOME
+                op_id = trova_o_crea_lavoratore(cursor, az_id, nom_lav, mans_lav, prescr)
                 
                 cursor.execute("SELECT id FROM documenti_lavoratori WHERE lavoratore_id = ? AND UPPER(tipo_documento) = ?", (op_id, doc_nome.upper()))
                 doc_esistente = cursor.fetchone()
@@ -499,7 +544,6 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
 def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client, azienda_selezionata):
     nome_lower = nome_file.lower()
     
-    # Scarto preventivo immediato
     if any(p in nome_lower for p in PAROLE_DA_SCARTARE_ASSOLUTE):
         registra_file_processato(path_univoco)
         return None, False
@@ -541,7 +585,6 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
         messaggi_esito = []
         testo_totale_pdf = " ".join([p["testo"] for p in pagine])
         
-        # FILTRO STRETTO: Se non è un documento dipendente, ignora tutto il file!
         if not e_documento_sicurezza_pertinente(nome_file, testo_totale_pdf):
             registra_file_processato(path_univoco)
             return None, False
@@ -595,7 +638,6 @@ st.markdown("""
     .metric-card h3 { margin: 0; font-size: 16px; color: #555; }
     .metric-card h2 { margin: 10px 0 0 0; font-size: 28px; color: #111; }
     .prescrizione-box { background-color: #fff3e0; border-left: 5px solid #ff9800; padding: 10px; margin-bottom: 15px; border-radius: 4px; font-size: 14px; }
-    .status-meter { background-color: #ffffff; padding: 10px 14px; border-radius: 6px; border: 1px solid #d1d5db; margin-top: 10px; font-size: 13px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -838,7 +880,7 @@ if azienda_selezionata:
             st.markdown("#### 📄 Upload Manuale Documento Singolo")
             file_caricato = st.file_uploader("Carica attestato PDF/DOCX:", type=["pdf", "docx"], key=f"uploader_{st.session_state['uploader_key']}")
             if file_caricato and api_key_inserita:
-                if st.button("🔍 ANALIZZA ED ESESEGUI UPLOAD"):
+                if st.button("🔍 ANALIZZA ED ESEGUI UPLOAD"):
                     with st.spinner("Analisi AI ed estrazione in corso..."):
                         client = Groq(api_key=api_key_inserita)
                         file_bytes = file_caricato.read()
@@ -862,6 +904,20 @@ if azienda_selezionata:
 
     st.write("---")
     
+    # --- BARRA UTIS: PULIZIA E UNIFICAZIONE DUPLICATI ---
+    if ha_permesso_modifica:
+        col_unif1, col_unif2 = st.columns([3, 1])
+        with col_unif1:
+            st.info("💡 **Hai duplicati nella lista?** Se `MARIO ROSSI` e `ROSSI MARIO` figurano separate, usa questo pulsante per unire immediatamente le schede mantenendo tutti i documenti presi dalle varie scansioni.")
+        with col_unif2:
+            if st.button("🔄 UNIFICA DUPLICATI"):
+                num_unificati = unifica_tutti_i_duplicati_azienda(azienda_selezionata)
+                if num_unificati > 0:
+                    st.success(f"⚡ Unificazione completata! {num_unificati} duplicati sono stati accorpati.")
+                    st.rerun()
+                else:
+                    st.info("Nessun duplicato rilevato da unificare.")
+
     # --- VISUALIZZAZIONE TABELLARE LAVORATORI ED EDITING ---
     with get_db_connection() as conn:
         df_lavoratori = pd.read_sql_query("""
