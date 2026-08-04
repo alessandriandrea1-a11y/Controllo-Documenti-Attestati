@@ -49,27 +49,41 @@ DURATA_CORSI_ANNI = {
 }
 
 def pulisci_percorso_dropbox(percorso_input):
+    """
+    Pulisce e normalizza qualsiasi link o percorso Dropbox (compresi link condivisi o sottocartelle).
+    """
     if not percorso_input:
         return ""
     
+    # Decodifica caratteri speciali tipo %20
     p = urllib.parse.unquote(str(percorso_input)).strip()
     
-    if "dropbox.com" in p:
-        if "/home" in p:
-            p = p.split("/home")[-1]
-        elif "/fo/" in p:
-            p = p.split("/fo/")[-1]
-        elif "/sh/" in p:
-            p = p.split("/sh/")[-1]
-        elif "/scl/fo/" in p:
-            p = p.split("/scl/fo/")[-1]
-            
+    # Rimuovi parametri query (es. ?dl=0, ?rlkey=...)
     if "?" in p:
         p = p.split("?")[0]
         
+    if "dropbox.com" in p:
+        # Estrai il percorso relativo dopo i domini/prefissi di Dropbox
+        for pattern in ["/home", "/fo/", "/sh/", "/scl/fo/", "/scl/fi/"]:
+            if pattern in p:
+                p = p.split(pattern)[-1]
+                break
+        # Se c'è ancora l'host completo, estrai solo la parte dopo il dominio
+        if "dropbox.com" in p:
+            parts = p.split("dropbox.com")
+            p = parts[-1]
+
+    # Clean up di barre multiple o spazi residui
     p = p.strip()
+    p = re.sub(r'/+', '/', p)
+    
     if p and not p.startswith("/"):
         p = "/" + p
+        
+    # Se il percorso è diventato solo "/" o vuoto, gestiscilo
+    if p == "/":
+        return ""
+        
     return p
 
 def estrai_nome_lavoratore_da_percorso(path_file):
@@ -211,13 +225,13 @@ def normalizza_nome_documento(tipo_doc, testo_estratto=""):
     t = (tipo_doc or "").upper().strip()
     testo_l = (testo_estratto or "").lower()
     
-    if "UNILAV" in t or "ASSUNZIONE" in t or "COMUNICAZIONE" in t and "LAVORATORE" in testo_l:
+    if "UNILAV" in t or "ASSUNZIONE" in t or ("COMUNICAZIONE" in t and "LAVORATORE" in testo_l):
         if "INDETERMINATO" in t or "T.I." in t or "tempo indeterminato" in testo_l or "a tempo indeterminato" in testo_l:
             return "UNILAV (Tempo Indeterminato)"
         elif "DETERMINATO" in t or "T.D." in t or "tempo determinato" in testo_l or "a tempo determinato" in testo_l:
             return "UNILAV (Tempo Determinato)"
         else:
-            return "UNILAV (Tempo Indeterminato)" # Default prudenziale se non specificato chiaramente
+            return "UNILAV (Tempo Indeterminato)"
             
     return tipo_doc.strip().title()
 
@@ -268,7 +282,6 @@ def calcola_stato_da_stringa_data(data_scad_str):
     data_pulita = str(data_scad_str).strip()
     data_lower = data_pulita.lower()
 
-    # Rilevamento esplicito di Tempo Indeterminato / T.I. / Illimitata
     if any(k in data_lower for k in ["indeterminato", "t.i.", "tempo indeterminato", "illimitata", "presente"]):
         return "Tempo Indeterminato", "🟢 In Regola"
 
@@ -400,7 +413,6 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
 
         mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
         
-        # Normalizzazione intelligente del nome documento per evitare duplicati
         doc_grezzo = dati_ai.get("documento_nome") or "Attestato Generico"
         doc_nome = normalizza_nome_documento(doc_grezzo, testo_estratto)
         
@@ -679,7 +691,7 @@ with st.sidebar:
                     conn.commit()
                 upload_db_to_dropbox()
                 st.session_state["azienda_selezionata"] = nuova_azienda
-                st.success(f"Azienda registrata! Percorso Dropbox: {percorso_pulito}")
+                st.success(f"Azienda registrata! Percorso Dropbox: `{percorso_pulito}`")
                 st.rerun()
             except sqlite3.IntegrityError: 
                 st.error("Azienda già esistente.")
@@ -722,15 +734,31 @@ if azienda_selezionata:
                 st.caption(f"Cartella base ditta: `{percorso_dropbox_ditta}`")
             
             sottocartella_specifica = st.text_input(
-                "Sottocartella specifica (opzionale):", 
+                "Sottocartella dipendente o link specifico:", 
                 value="", 
-                placeholder="Es. /MioCantiere/Aggiornamenti"
+                placeholder="Es. Mario Rossi oppure /Cantiere/Mario Rossi o incolla il link Dropbox"
             ).strip()
             
-            percorso_da_usare = pulisci_percorso_dropbox(sottocartella_specifica) if sottocartella_specifica else percorso_dropbox_ditta
+            # Calcolo percorso da scansionare
+            if sottocartella_specifica:
+                sub_pulita = pulisci_percorso_dropbox(sottocartella_specifica)
+                if sub_pulita.startswith("/") and percorso_dropbox_ditta:
+                    # Se l'utente inserisce un percorso relativo es. /Mario Rossi o un link
+                    if sub_pulita.startswith(percorso_dropbox_ditta):
+                        percorso_da_usare = sub_pulita
+                    else:
+                        percorso_da_usare = f"{percorso_dropbox_ditta.rstrip('/')}{sub_pulita}"
+                elif sub_pulita.startswith("/"):
+                    percorso_da_usare = sub_pulita
+                else:
+                    percorso_da_usare = f"{percorso_dropbox_ditta.rstrip('/')}/{sub_pulita}"
+            else:
+                percorso_da_usare = percorso_dropbox_ditta
+
+            percorso_da_usare = pulisci_percorso_dropbox(percorso_da_usare)
 
             if percorso_da_usare:
-                st.caption(f"Percorso effettivo di scansione: `{percorso_da_usare}`")
+                st.caption(f"🔍 Percorso effettivo di scansione: `{percorso_da_usare}`")
                 
                 col_Avvia, col_Stop = st.columns(2)
                 with col_Avvia:
@@ -757,7 +785,17 @@ if azienda_selezionata:
                         with st.spinner(f"📦 Scansione della cartella `{percorso_da_usare}` in corso..."):
                             client = Groq(api_key=api_key_inserita)
                             try:
-                                res = dbx.files_list_folder(percorso_da_usare, recursive=True)
+                                # Tentativo di lettura ricorsiva
+                                try:
+                                    res = dbx.files_list_folder(percorso_da_usare, recursive=True)
+                                except dropbox.exceptions.ApiError as path_err:
+                                    # Fallback: prova senza slash iniziale o con ricerca flessibile
+                                    if "not_found" in str(path_err).lower():
+                                        percorso_alt = percorso_da_usare.lstrip("/")
+                                        res = dbx.files_list_folder(percorso_alt, recursive=True)
+                                    else:
+                                        raise path_err
+
                                 file_list = res.entries
                                 
                                 while res.has_more:
@@ -766,6 +804,7 @@ if azienda_selezionata:
 
                                 processed = 0
                                 scartati = 0
+                                gia_presenti = 0
                                 bloccato_per_limit = False
                                 
                                 for entry in file_list:
@@ -778,6 +817,7 @@ if azienda_selezionata:
                                             path_univoco = entry.path_lower
                                             
                                             if e_file_gia_processato(path_univoco):
+                                                gia_presenti += 1
                                                 continue
                                                 
                                             parole_da_scartare = ["pos", "p.o.s", "piano operativo", "fattura", "preventivo"]
@@ -811,12 +851,13 @@ if azienda_selezionata:
                                                 st.error(f"Errore lettura {entry.name}: {err_file}")
 
                                 if not bloccato_per_limit:
-                                    st.success(f"✅ Scansione completata! Processati: {processed} file nuovi, Scartati: {scartati}.")
+                                    st.success(f"✅ Scansione completata! Processati: {processed} file nuovi, Già presenti: {gia_presenti}, Scartati: {scartati}.")
                                     st.session_state["scansione_in_corso"] = False
                                     st.rerun()
 
                             except Exception as e_dbx:
-                                st.error(f"Errore scansione Dropbox: {e_dbx}")
+                                st.error(f"❌ Impossibile trovare la cartella su Dropbox `{percorso_da_usare}`: {e_dbx}")
+                                st.info("💡 Suggerimento: Verifica se il nome della sottocartella o del dipendente coincide perfettamente con la struttura su Dropbox.")
                                 st.session_state["scansione_in_corso"] = False
 
         with c_right:
