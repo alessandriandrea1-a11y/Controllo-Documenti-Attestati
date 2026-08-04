@@ -255,6 +255,9 @@ def calcola_stato_da_stringa_data(data_scad_str):
     if not data_scad_str or data_scad_str in ["Da Verificare", "NON_PRESENTI"]:
         return "Da Verificare", "🟡 In Scadenza"
 
+    if data_scad_str in ["Illimitata", "Tempo Indeterminato", "T.I."]:
+        return data_scad_str, "🟢 In Regola"
+
     fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
     oggi = datetime.now(fuso_orario).date()
     
@@ -281,7 +284,7 @@ def calcola_stato_da_stringa_data(data_scad_str):
 
 def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita, tipo_documento=""):
     doc_lower = (tipo_documento or "").lower()
-    is_senza_scadenza = any(termine in doc_lower for termine in ["tesserino", "badge", "riconoscimento", "dpi", "consegna", "dispositivi"])
+    is_senza_scadenza = any(termine in doc_lower for termine in ["tesserino", "badge", "riconoscimento", "dpi", "consegna", "dispositivi", "unilav t.i.", "indeterminato"])
     
     if is_senza_scadenza:
         data_rif = data_emissione_str if (data_emissione_str and data_emissione_str != "NON_PRESENTI") else "Presente"
@@ -323,7 +326,7 @@ def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
         "visita", "medica", "medico", "lavoratore", "preposto", "dirigente", "antincendio", 
         "primo soccorso", "spazi confinati", "ple", "gru", "muletto", "carrello", "imbracatore", 
         "dpi", "consegna", "tesserino", "badge", "riconoscimento", "asl", "ispettorato", 
-        "dlgs 81", "formazione lavoratori", "formazione accordo stato regioni", "sorveglianza sanitaria"
+        "dlgs 81", "formazione lavoratori", "formazione accordo stato regioni", "sorveglianza sanitaria", "unilav"
     ]
     
     if any(p in nome_lower for p in parole_chiave_sicurezza):
@@ -344,7 +347,7 @@ NOTA IMPORTANTE: Se nel testo NON riesci a identificare con certezza il Nome e C
 
 REGOLE PER DATE E SCADENZE:
 1. Data Emissione: GG/MM/AAAA oppure NON_PRESENTI.
-2. Data Scadenza: GG/MM/AAAA oppure NON_PRESENTI (Tesserini, DPI = NON_PRESENTI).
+2. Data Scadenza: GG/MM/AAAA oppure NON_PRESENTI (Tesserini, DPI, UNILAV a tempo indeterminato = NON_PRESENTI).
 
 Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
 {{
@@ -769,64 +772,68 @@ if azienda_selezionata:
                                                 scartati += 1
                                                 continue
 
-                                            _, res_file = dbx.files_download(entry.path_lower)
-                                            esito_file, stopped = elabora_singolo_documento_con_ai(
-                                                file_bytes=res_file.content,
-                                                nome_file=entry.name,
-                                                path_univoco=path_univoco,
-                                                client=client,
-                                                azienda_selezionata=azienda_selezionata
-                                            )
-                                            
-                                            if stopped:
-                                                st.error(esito_file)
-                                                bloccato_per_limit = True
-                                                st.session_state["scansione_in_corso"] = False
-                                                break
+                                            try:
+                                                _, res_file = dbx.files_download(entry.path_lower)
+                                                file_bytes = res_file.content
                                                 
-                                            if esito_file:
-                                                st.write(esito_file)
-                                                processed += 1
+                                                msg_esito, is_rate_limit = elabora_singolo_documento_con_ai(
+                                                    file_bytes=file_bytes,
+                                                    nome_file=entry.name,
+                                                    path_univoco=path_univoco,
+                                                    client=client,
+                                                    azienda_selezionata=azienda_selezionata
+                                                )
+                                                
+                                                if is_rate_limit:
+                                                    st.error(msg_esito)
+                                                    st.session_state["scansione_in_corso"] = False
+                                                    bloccato_per_limit = True
+                                                    break
+
+                                                if msg_esito:
+                                                    st.write(msg_esito)
+                                                    processed += 1
+                                            except Exception as err_file:
+                                                st.error(f"Errore lettura {entry.name}: {err_file}")
 
                                 if not bloccato_per_limit:
-                                    st.success(f"✅ Scansione completata! Processati {processed} nuovi file (scartati {scartati}).")
+                                    st.success(f"✅ Scansione completata! Processati: {processed} file nuovi, Scartati: {scartati}.")
                                     st.session_state["scansione_in_corso"] = False
                                     st.rerun()
 
                             except Exception as e_dbx:
-                                st.error(f"⚠️ Errore durante l'accesso a Dropbox: {e_dbx}")
+                                st.error(f"Errore scansione Dropbox: {e_dbx}")
                                 st.session_state["scansione_in_corso"] = False
 
         with c_right:
-            st.markdown("#### 📄 Upload Diretto Locale")
+            st.markdown("#### 📄 Upload Manuale Documento Singolo")
             if file_caricato and api_key_inserita:
-                client = Groq(api_key=api_key_inserita)
-                with st.spinner("⏳ Analisi del file caricato in corso..."):
-                    bytes_data = file_caricato.read()
-                    esito_up, stopped = elabora_singolo_documento_con_ai(
-                        file_bytes=bytes_data,
-                        nome_file=file_caricato.name,
-                        path_univoco=f"upload_locale_{file_caricato.name}",
-                        client=client,
-                        azienda_selezionata=azienda_selezionata
-                    )
-                    if stopped:
-                        st.error(esito_up)
-                    elif esito_up:
-                        st.success(esito_up)
-                        st.session_state["uploader_key"] += 1
-                        st.rerun()
-                    else:
-                        st.info("ℹ️ Nessun documento rilevante estratto o file non di sicurezza.")
+                if st.button("🔍 ANALIZZA ED ESESEGUI UPLOAD"):
+                    with st.spinner("Analisi AI ed estrazione in corso..."):
+                        client = Groq(api_key=api_key_inserita)
+                        file_bytes = file_caricato.read()
+                        path_dummy = f"/manual_upload/{file_caricato.name}"
+                        
+                        msg_esito, is_rate_limit = elabora_singolo_documento_con_ai(
+                            file_bytes=file_bytes,
+                            nome_file=file_caricato.name,
+                            path_univoco=path_dummy,
+                            client=client,
+                            azienda_selezionata=azienda_selezionata
+                        )
+                        if is_rate_limit:
+                            st.error(msg_esito)
+                        else:
+                            st.success(f"✅ {msg_esito or 'Documento processato.'}")
+                            st.session_state["uploader_key"] += 1
+                            st.rerun()
 
-    # --- VISUALIZZAZIONE TABELLARE E METRICHE ---
     st.write("---")
     
+    # --- VISUALIZZAZIONE TABELLARE LAVORATORI ED EDITING ---
     with get_db_connection() as conn:
         df_lavoratori = pd.read_sql_query("""
-            SELECT l.id, l.nominativo AS [Lavoratore], l.mansione AS [Mansione], 
-                   l.stato_scadenza_totale AS [Stato Idoneità Cantiere], 
-                   l.prescrizioni_mediche AS [Prescrizioni Sanitarie]
+            SELECT l.id, l.nominativo, l.mansione, l.stato_scadenza_totale, l.prescrizioni_mediche 
             FROM lavoratori l
             JOIN aziende a ON l.azienda_id = a.id
             WHERE a.nome = ?
@@ -834,130 +841,111 @@ if azienda_selezionata:
         """, conn, params=(azienda_selezionata,))
 
     if not df_lavoratori.empty:
-        totale_lav = len(df_lavoratori)
-        abilitati = len(df_lavoratori[df_lavoratori["Stato Idoneità Cantiere"].str.contains("ABILITATO", na=False)])
-        monitorare = len(df_lavoratori[df_lavoratori["Stato Idoneità Cantiere"].str.contains("MONITORARE", na=False)])
-        interdetti = len(df_lavoratori[df_lavoratori["Stato Idoneità Cantiere"].str.contains("INTERDETTO", na=False)])
+        col_m1, col_m2, col_m3 = st.columns(3)
+        tot_lav = len(df_lavoratori)
+        tot_ok = len(df_lavoratori[df_lavoratori['stato_scadenza_totale'].str.contains('🟢', na=False)])
+        tot_mon = len(df_lavoratori[df_lavoratori['stato_scadenza_totale'].str.contains('🟡', na=False)])
+        tot_ko = len(df_lavoratori[df_lavoratori['stato_scadenza_totale'].str.contains('🔴', na=False)])
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.markdown(f'<div class="metric-card"><h3>👥 Lavoratori</h3><h2>{totale_lav}</h2></div>', unsafe_allow_html=True)
-        m2.markdown(f'<div class="metric-card"><h3>🟢 Abilitati</h3><h2>{abilitati}</h2></div>', unsafe_allow_html=True)
-        m3.markdown(f'<div class="metric-card"><h3>🟡 Monitorare</h3><h2>{monitorare}</h2></div>', unsafe_allow_html=True)
-        m4.markdown(f'<div class="metric-card"><h3>🔴 Interdetti</h3><h2>{interdetti}</h2></div>', unsafe_allow_html=True)
+        with col_m1:
+            st.markdown(f"<div class='metric-card'><h3>🟢 ABILITATI</h3><h2>{tot_ok} / {tot_lav}</h2></div>", unsafe_allow_html=True)
+        with col_m2:
+            st.markdown(f"<div class='metric-card'><h3>🟡 DA MONITORARE</h3><h2>{tot_mon}</h2></div>", unsafe_allow_html=True)
+        with col_m3:
+            st.markdown(f"<div class='metric-card'><h3>🔴 INTERDETTI / INCOMPLETI</h3><h2>{tot_ko}</h2></div>", unsafe_allow_html=True)
 
         st.write("---")
-        st.markdown("### 📋 Elenco Personale e Stato Documentale")
+        st.markdown("### 👷 Elenco Dipendenti e Stato Documenti")
 
-        for idx, row in df_lavoratori.iterrows():
-            lav_id = row["id"]
-            nom = row["Lavoratore"]
-            mans = row["Mansione"]
-            stato = row["Stato Idoneità Cantiere"]
-            prescr = row["Prescrizioni Sanitarie"]
+        for idx, lav in df_lavoratori.iterrows():
+            lav_id = lav['id']
+            nom = lav['nominativo']
+            mans = lav['mansione']
+            st_tot = lav['stato_scadenza_totale']
+            prescr = lav['prescrizioni_mediche']
 
-            with get_db_connection() as conn:
-                df_docs = pd.read_sql_query("""
-                    SELECT id, tipo_documento AS [Documento], stato_scadenza AS [Stato], 
-                           data_scadenza AS [Data Scadenza / Riferimento], nome_file_origine AS [File di Origine]
-                    FROM documenti_lavoratori
-                    WHERE lavoratore_id = ?
-                    ORDER BY data_scadenza ASC
-                """, conn, params=(lav_id,))
-
-            num_attestati = len(df_docs)
-
-            with st.expander(f"{stato} | **{nom}** ({mans}) — 📜 Attestati registrati: {num_attestati}"):
+            with st.expander(f"{st_tot} | **{nom}** — *{mans}*", expanded=False):
                 if prescr and prescr != 'Nessuna prescrizione rilevata':
-                    st.markdown(f'<div class="prescrizione-box">⚠️ <b>Prescrizioni Sanitarie:</b> {prescr}</div>', unsafe_allow_html=True)
+                    st.markdown(f"<div class='prescrizione-box'>⚠️ <b>Prescrizioni Mediche:</b> {prescr}</div>", unsafe_allow_html=True)
+
+                with get_db_connection() as conn:
+                    df_docs = pd.read_sql_query("""
+                        SELECT id, tipo_documento, data_scadenza, stato_scadenza, nome_file_origine
+                        FROM documenti_lavoratori
+                        WHERE lavoratore_id = ?
+                    """, conn, params=(lav_id,))
 
                 if not df_docs.empty:
-                    st.dataframe(df_docs.drop(columns=["id"]), use_container_width=True)
+                    st.dataframe(df_docs[['tipo_documento', 'data_scadenza', 'stato_scadenza', 'nome_file_origine']], use_container_width=True)
                 else:
-                    st.write("❌ Nessun documento attualmente registrato per questo lavoratore.")
+                    st.info("Nessun documento attualmente registrato per questo dipendente.")
 
-                # --- PANNELLO MODIFICA E NUOVO ATTESTATO MANUALE ---
                 if ha_permesso_modifica:
-                    st.write("---")
-                    col_mod, col_add = st.columns(2)
+                    st.markdown("##### 🛠️ Gestione Documenti Dipendente")
                     
-                    # 1. MODIFICA DOCUMENTO ESISTENTE
-                    with col_mod:
-                        st.markdown("✏️ **Modifica / Correggi Documento Esistente**")
+                    c_edit1, c_edit2 = st.columns(2)
+                    with c_edit1:
+                        st.markdown("**Modifica / Aggiorna Documento Esistente:**")
                         if not df_docs.empty:
-                            maggiori_options = {f"{r['Documento']} ({r['Data Scadenza / Riferimento']})": r['id'] for _, r in df_docs.iterrows()}
-                            scelta_doc_str = st.selectbox("Seleziona attestato da modificare:", list(maggiori_options.keys()), key=f"sel_doc_mod_{lav_id}")
-                            doc_id_selezionato = maggiori_options[scelta_doc_str]
+                            materia_opzioni = {f"{r['tipo_documento']} (Scad: {r['data_scadenza']})": r['id'] for _, r in df_docs.iterrows()}
+                            doc_sel_label = st.selectbox("Seleziona documento da modificare:", list(materia_opzioni.keys()), key=f"sel_doc_{lav_id}")
+                            doc_id_selezionato = materia_opzioni[doc_sel_label]
                             
-                            # Prende i dati attuali dal DB
-                            doc_corrente = df_docs[df_docs['id'] == doc_id_selezionato].iloc[0]
+                            doc_row = df_docs[df_docs['id'] == doc_id_selezionato].iloc[0]
                             
-                            nuovo_nome_doc = st.text_input("Nome Documento:", value=doc_corrente['Documento'], key=f"inp_nome_doc_{doc_id_selezionato}")
-                            nuova_data_scad = st.text_input("Data Scadenza / Riferimento (GG/MM/AAAA o Presente):", value=doc_corrente['Data Scadenza / Riferimento'], key=f"inp_data_doc_{doc_id_selezionato}")
-                            
-                            c_salva_mod, c_del_doc = st.columns(2)
-                            with c_salva_mod:
-                                if st.button("💾 Salva Modifica", key=f"btn_save_doc_{doc_id_selezionato}"):
-                                    data_scad_calc, nuovo_stato = calcola_stato_da_stringa_data(nuova_data_scad)
+                            with st.form(key=f"form_modifica_{doc_id_selezionato}"):
+                                nuovo_nome_doc = st.text_input("Tipo Documento:", value=doc_row['tipo_documento'])
+                                nuova_data_scad = st.text_input("Data Scadenza (GG/MM/AAAA o T.I.):", value=str(doc_row['data_scadenza']))
+                                
+                                if st.form_submit_button("💾 Salva Modifiche Documento"):
+                                    data_scad_calc, nuovo_stato = calcola_stato_da_stringa_data(nuova_data_scad.strip())
+                                    
                                     with get_db_connection() as conn:
                                         cursor = conn.cursor()
                                         cursor.execute("""
-                                            UPDATE documenti_lavoratori 
+                                            UPDATE documenti_lavoratori
                                             SET tipo_documento = ?, data_scadenza = ?, stato_scadenza = ?
                                             WHERE id = ?
                                         """, (nuovo_nome_doc.strip(), data_scad_calc, nuovo_stato, doc_id_selezionato))
                                         conn.commit()
+                                    
                                     aggiorna_stato_generale_lavoratore(lav_id)
                                     upload_db_to_dropbox()
-                                    st.success("Documento aggiornato!")
+                                    st.success("✅ Documento aggiornato correttamente!")
                                     st.rerun()
-                                    
-                            with c_del_doc:
-                                if st.button("🗑️ Elimina Documento", key=f"btn_del_doc_{doc_id_selezionato}"):
+
+                    with c_edit2:
+                        st.markdown("**Aggiungi Nuovo Documento Manuale:**")
+                        with st.form(key=f"form_nuovo_doc_{lav_id}"):
+                            nuovo_tipo = st.text_input("Nome Documento (es. UNILAV, Formazione Generica):")
+                            nuova_scad = st.text_input("Data Scadenza (es. 15/10/2027 o T.I.):")
+                            
+                            if st.form_submit_button("➕ Aggiungi Documento"):
+                                if nuovo_tipo.strip():
+                                    data_scad_calc, nuovo_stato = calcola_stato_da_stringa_data(nuova_scad.strip())
                                     with get_db_connection() as conn:
                                         cursor = conn.cursor()
-                                        cursor.execute("DELETE FROM documenti_lavoratori WHERE id = ?", (doc_id_selezionato,))
+                                        cursor.execute("""
+                                            INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, data_scadenza, stato_scadenza, nome_file_origine)
+                                            VALUES (?, ?, ?, ?, 'Inserimento Manuale')
+                                        """, (lav_id, nuovo_tipo.strip(), data_scad_calc, nuovo_stato))
                                         conn.commit()
+                                    
                                     aggiorna_stato_generale_lavoratore(lav_id)
                                     upload_db_to_dropbox()
-                                    st.success("Documento eliminato!")
+                                    st.success("✅ Nuovo documento aggiunto!")
                                     st.rerun()
-                        else:
-                            st.caption("Nessun documento da modificare.")
-
-                    # 2. AGGIUNTA NUOVO DOCUMENTO MANUALE
-                    with col_add:
-                        st.markdown("➕ **Aggiungi Attestato / Documento Manualmente**")
-                        add_nome_doc = st.text_input("Nome Nuovo Documento:", placeholder="Es. Formazione Generale 4 ore", key=f"add_nome_{lav_id}")
-                        add_data_scad = st.text_input("Data Scadenza (GG/MM/AAAA) o 'Presente':", placeholder="Es. 15/05/2027", key=f"add_data_{lav_id}")
-                        
-                        if st.button("➕ Registra Documento", key=f"btn_add_doc_{lav_id}"):
-                            if add_nome_doc.strip():
-                                data_scad_calc, nuovo_stato = calcola_stato_da_stringa_data(add_data_scad.strip())
-                                with get_db_connection() as conn:
-                                    cursor = conn.cursor()
-                                    cursor.execute("""
-                                        INSERT INTO documenti_lavoratori (lavoratore_id, tipo_documento, stato_scadenza, data_scadenza, nome_file_origine)
-                                        VALUES (?, ?, ?, ?, 'Inserimento Manuale')
-                                    """, (lav_id, add_nome_doc.strip(), nuovo_stato, data_scad_calc))
-                                    conn.commit()
-                                aggiorna_stato_generale_lavoratore(lav_id)
-                                upload_db_to_dropbox()
-                                st.success("Nuovo documento inserito con successo!")
-                                st.rerun()
-                            else:
-                                st.error("Inserisci almeno il nome del documento.")
 
                     st.write("---")
-                    if st.button(f"🗑️ Rimuovi Interamente Lavoratore ({nom})", key=f"del_lav_{lav_id}"):
+                    if st.button(f"🗑️ Elimina Interamente il Dipendente: {nom}", key=f"del_lav_{lav_id}"):
                         with get_db_connection() as conn:
                             cursor = conn.cursor()
                             cursor.execute("DELETE FROM documenti_lavoratori WHERE lavoratore_id = ?", (lav_id,))
                             cursor.execute("DELETE FROM lavoratori WHERE id = ?", (lav_id,))
                             conn.commit()
                         upload_db_to_dropbox()
-                        st.success(f"Lavoratore {nom} eliminato!")
+                        st.success(f"Dipendente {nom} eliminato con successo.")
                         st.rerun()
+
     else:
-        st.info("ℹ️ Nessun lavoratore o attestato registrato per questa ditta. Esegui la scansione della cartella Dropbox o carica un file manualmente.")
-else:
-    st.info("👈 Seleziona o crea un'azienda dalla barra laterale per accedere al Pannello di Controllo CSE.")
+        st.info("Nessun dipendente registrato per l'azienda selezionata.")
