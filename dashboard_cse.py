@@ -293,8 +293,7 @@ def aggiorna_stato_generale_lavoratore(lavoratore_id, conn_esistente=None):
             conn.commit()
 
 def aggiungi_lavoratore_manuale(azienda, nome_completo):
-    """Inserisce manualmente un dipendente evitando conflitti e OperationalError di SQLite."""
-    # Convertiamo in maiuscolo e puliamo gli spazi per omogeneità con le scansioni OCR
+    """Inserisce un dipendente rilevando automaticamente la struttura del database."""
     nome_clean = nome_completo.strip().upper()
     azienda_clean = azienda.strip().upper()
     
@@ -304,28 +303,58 @@ def aggiungi_lavoratore_manuale(azienda, nome_completo):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         
-        # 1. Verifica preventiva: controlla se l'operaio esiste già per evitare blocchi DB
-        cursor.execute(
-            "SELECT COUNT(*) FROM lavoratori WHERE UPPER(azienda) = ? AND UPPER(nome_completo) = ?",
-            (azienda_clean, nome_clean)
-        )
-        if cursor.fetchone()[0] > 0:
-            return False, f"⚠️ L'operaio '{nome_clean}' è già presente per l'azienda '{azienda_clean}'."
-
-        # 2. Controllo dinamico della struttura delle colonne
-        cursor.execute("PRAGMA table_info(lavoratori)")
-        colonne = [col[1] for col in cursor.fetchall()]
+        # 1. Trova il nome reale della tabella (lavoratori, dipendenti, anagrafica, ecc.)
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tabelle = [row[0] for row in cursor.fetchall()]
         
+        tabella_target = None
+        for t in ["lavoratori", "dipendenti", "lavoratore", "anagrafica"]:
+            if t in tabelle:
+                tabella_target = t
+                break
+        
+        # Se non trova nomi standard, prende la prima tabella disponibile che non sia di sistema
+        if not tabella_target:
+            tabelle_valide = [t for t in tabelle if not t.startswith('sqlite_')]
+            if tabelle_valide:
+                tabella_target = tabelle_valide[0]
+            else:
+                return False, "Errore DB: Nessuna tabella trovata nel database."
+
+        # 2. Mappa i nomi reali delle colonne presenti nella tabella
+        cursor.execute(f"PRAGMA table_info({tabella_target})")
+        colonne = [col[1].lower() for col in cursor.fetchall()]
+        colonne_originali = [col[1] for col in cursor.fetchall()] # mantiene il casing originale
+        
+        # Individua la colonna per l'azienda
+        col_azienda = next((c for c in colonne if "azienda" in c or "ditta" in c or "societa" in c), None)
+        # Individua la colonna per il nome
+        col_nome = next((c for c in colonne if "nome" in c or "dipendente" in c or "lavoratore" in c), None)
+
+        if not col_azienda or not col_nome:
+            return False, f"Impossibile identificare le colonne nel DB. Colonne trovate: {', '.join(colonne)}"
+
+        # 3. Controllo preventivo duplicati
         try:
-            # 3. Inserimento sicuro
+            cursor.execute(
+                f"SELECT COUNT(*) FROM {tabella_target} WHERE UPPER({col_azienda}) = ? AND UPPER({col_nome}) = ?",
+                (azienda_clean, nome_clean)
+            )
+            if cursor.fetchone()[0] > 0:
+                return False, f"⚠️ L'operaio '{nome_clean}' è già presente per l'azienda '{azienda_clean}'."
+        except Exception:
+            pass # Se fallisce la verifica previa, prosegue tentativamente con l'inserimento
+
+        # 4. Inserimento dinamico
+        try:
             if "stato_scadenza_totale" in colonne:
                 cursor.execute(
-                    "INSERT INTO lavoratori (azienda, nome_completo, stato_scadenza_totale) VALUES (?, ?, ?)",
+                    f"INSERT INTO {tabella_target} ({col_azienda}, {col_nome}, stato_scadenza_totale) VALUES (?, ?, ?)",
                     (azienda_clean, nome_clean, "🔴 Nessun Documento")
                 )
             else:
                 cursor.execute(
-                    "INSERT INTO lavoratori (azienda, nome_completo) VALUES (?, ?)",
+                    f"INSERT INTO {tabella_target} ({col_azienda}, {col_nome}) VALUES (?, ?)",
                     (azienda_clean, nome_clean)
                 )
                 
@@ -333,10 +362,15 @@ def aggiungi_lavoratore_manuale(azienda, nome_completo):
             return True, f"✅ Operaio '{nome_clean}' aggiunto con successo a '{azienda_clean}'!"
             
         except sqlite3.IntegrityError:
-            return False, f"⚠️ L'operaio '{nome_clean}' è già registrato nel sistema."
+            return False, f"⚠️ L'operaio '{nome_clean}' esiste già nel sistema."
         except sqlite3.OperationalError as e:
-            # In caso di errore specifico della tabella SQLite, riporta il dettaglio senza crashare l'app
-            return False, f"Errore DB (verificare nome colonna): {str(e)}"
+            return False, f"Errore scrittura DB ({tabella_target}): {str(e)}"
+
+
+
+
+
+
 
 
 def unifica_tutti_i_duplicati_azienda(azienda_nome):
