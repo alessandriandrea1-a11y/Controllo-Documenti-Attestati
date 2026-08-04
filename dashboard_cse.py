@@ -292,9 +292,8 @@ def aggiorna_stato_generale_lavoratore(lavoratore_id, conn_esistente=None):
             cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, lavoratore_id))
             conn.commit()
 
-
 def aggiungi_lavoratore_manuale(azienda, nome_completo):
-    """Inserisce un dipendente garantendo la compatibilità con le query della tabella principale."""
+    """Associa correttamente il dipendente all'ID o al nome dell'azienda selezionata."""
     nome_clean = nome_completo.strip().upper()
     azienda_clean = azienda.strip().upper()
     
@@ -304,45 +303,38 @@ def aggiungi_lavoratore_manuale(azienda, nome_completo):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         
-        # Legge le colonne reali della tabella
-        cursor.execute("PRAGMA table_info(lavoratori)")
-        colonne = [col[1] for col in cursor.fetchall()]
-        
-        col_azienda = "azienda_id" if "azienda_id" in colonne else ("azienda" if "azienda" in colonne else None)
-        col_nome = "nominativo" if "nominativo" in colonne else ("nome_completo" if "nome_completo" in colonne else None)
-        
-        # 1. Controllo preventivo duplicati per questa specifica azienda
-        cursor.execute(
-            f"SELECT COUNT(*) FROM lavoratori WHERE UPPER({col_nome}) = ? AND UPPER({col_azienda}) = ?",
-            (nome_clean, azienda_clean)
-        )
-        if cursor.fetchone()[0] > 0:
-            return False, f"⚠️ L'operaio '{nome_clean}' è già presente per l'azienda '{azienda_clean}'."
-
-        # 2. Inserimento dinamico compilando le colonne necessarie
+        # 1. Trova l'ID numerico dell'azienda se la tabella aziende esiste
+        id_azienda = azienda_clean
         try:
-            campi = [col_azienda, col_nome]
-            valori = [azienda_clean, nome_clean]
-            
-            if "stato_scadenza_totale" in colonne:
-                campi.append("stato_scadenza_totale")
-                valori.append("🔴 Nessun Documento")
-                
-            if "mansione" in colonne:
-                campi.append("mansione")
-                valori.append("OPERAIO")  # Valore di default per evitare che rimanga NULL
+            cursor.execute("SELECT id FROM aziende WHERE UPPER(nome) = ? OR UPPER(ragione_sociale) = ?", (azienda_clean, azienda_clean))
+            res = cursor.fetchone()
+            if res:
+                id_azienda = res[0]
+        except Exception:
+            pass  # Se la tabella 'aziende' non c'è, mantiene il nome testuale
 
-            placeholders = ", ".join(["?"] * len(campi))
-            nomi_campi = ", ".join(campi)
-            
-            cursor.execute(f"INSERT INTO lavoratori ({nomi_campi}) VALUES ({placeholders})", valori)
+        # 2. Se l'operaio esiste già (anche se mal associato), aggiorna la sua azienda
+        cursor.execute("SELECT id FROM lavoratori WHERE UPPER(nominativo) = ?", (nome_clean,))
+        lavoratore_esistente = cursor.fetchone()
+        
+        if lavoratore_esistente:
+            cursor.execute("UPDATE lavoratori SET azienda_id = ? WHERE UPPER(nominativo) = ?", (id_azienda, nome_clean))
+            conn.commit()
+            return True, f"✅ Operaio '{nome_clean}' aggiornato e associato a '{azienda_clean}'!"
+
+        # 3. Se non esiste, lo inserisce da zero
+        try:
+            cursor.execute(
+                "INSERT INTO lavoratori (azienda_id, nominativo, stato_scadenza_totale, mansione) VALUES (?, ?, ?, ?)",
+                (id_azienda, nome_clean, "🔴 Nessun Documento", "OPERAIO")
+            )
             conn.commit()
             return True, f"✅ Operaio '{nome_clean}' aggiunto con successo a '{azienda_clean}'!"
-            
-        except sqlite3.IntegrityError:
-            return False, f"⚠️ L'operaio '{nome_clean}' esiste già nel sistema."
-        except sqlite3.OperationalError as e:
-            return False, f"Errore scrittura DB: {str(e)}"
+        except Exception as e:
+            return False, f"Errore durante l'inserimento: {str(e)}"
+
+
+
 
 
 
