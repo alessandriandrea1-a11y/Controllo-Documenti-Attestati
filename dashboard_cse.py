@@ -207,6 +207,20 @@ def pulisci_nome_rigido(nome_grezzo):
     nome_pulito = re.sub(r'\s+', ' ', nome).strip().upper()
     return nome_pulito if len(nome_pulito) > 3 else "SCONOSCIUTO"
 
+def normalizza_nome_documento(tipo_doc, testo_estratto=""):
+    t = (tipo_doc or "").upper().strip()
+    testo_l = (testo_estratto or "").lower()
+    
+    if "UNILAV" in t or "ASSUNZIONE" in t or "COMUNICAZIONE" in t and "LAVORATORE" in testo_l:
+        if "INDETERMINATO" in t or "T.I." in t or "tempo indeterminato" in testo_l or "a tempo indeterminato" in testo_l:
+            return "UNILAV (Tempo Indeterminato)"
+        elif "DETERMINATO" in t or "T.D." in t or "tempo determinato" in testo_l or "a tempo determinato" in testo_l:
+            return "UNILAV (Tempo Determinato)"
+        else:
+            return "UNILAV (Tempo Indeterminato)" # Default prudenziale se non specificato chiaramente
+            
+    return tipo_doc.strip().title()
+
 def aggiorna_stato_generale_lavoratore(lavoratore_id):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -248,15 +262,15 @@ def stima_anni_validita_da_tipo(tipo_documento):
     return 5
 
 def calcola_stato_da_stringa_data(data_scad_str):
-    """
-    Ricalcola lo stato (🟢, 🟡, 🔴) partendo direttamente da una data GG/MM/AAAA.
-    Utilizzata sia per l'AI che per la modifica MANUALE dell'utente.
-    """
     if not data_scad_str or data_scad_str in ["Da Verificare", "NON_PRESENTI"]:
         return "Da Verificare", "🟡 In Scadenza"
 
-    if data_scad_str in ["Illimitata", "Tempo Indeterminato", "T.I."]:
-        return data_scad_str, "🟢 In Regola"
+    data_pulita = str(data_scad_str).strip()
+    data_lower = data_pulita.lower()
+
+    # Rilevamento esplicito di Tempo Indeterminato / T.I. / Illimitata
+    if any(k in data_lower for k in ["indeterminato", "t.i.", "tempo indeterminato", "illimitata", "presente"]):
+        return "Tempo Indeterminato", "🟢 In Regola"
 
     fuso_orario = zoneinfo.ZoneInfo("Europe/Rome")
     oggi = datetime.now(fuso_orario).date()
@@ -264,13 +278,13 @@ def calcola_stato_da_stringa_data(data_scad_str):
     dt_scad = None
     for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
         try:
-            dt_scad = datetime.strptime(data_scad_str, fmt).date()
+            dt_scad = datetime.strptime(data_pulita, fmt).date()
             break
         except ValueError:
             pass
 
     if not dt_scad:
-        return data_scad_str, "🟢 In Regola"
+        return data_pulita, "🟢 In Regola"
 
     data_formattata = dt_scad.strftime("%d/%m/%Y")
     giorni_rimanenti = (dt_scad - oggi).days
@@ -282,20 +296,15 @@ def calcola_stato_da_stringa_data(data_scad_str):
     else:
         return data_formattata, "🟢 In Regola"
 
-def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita, tipo_documento=""):
+def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita, tipo_documento="", testo_estratto=""):
     doc_lower = (tipo_documento or "").lower()
-    is_senza_scadenza = any(termine in doc_lower for termine in ["tesserino", "badge", "riconoscimento", "dpi", "consegna", "dispositivi", "unilav t.i.", "indeterminato"])
+    testo_lower = (testo_estratto or "").lower()
     
-    if is_senza_scadenza:
-        data_rif = data_emissione_str if (data_emissione_str and data_emissione_str != "NON_PRESENTI") else "Presente"
-        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y"):
-            try:
-                dt_rif = datetime.strptime(data_rif, fmt).date()
-                data_rif = dt_rif.strftime("%d/%m/%Y")
-                break
-            except Exception:
-                pass
-        return data_rif, "🟢 In Regola"
+    is_senza_scadenza = any(termine in doc_lower for termine in ["tesserino", "badge", "riconoscimento", "dpi", "consegna", "dispositivi", "unilav (tempo indeterminato)", "indeterminato"])
+    is_unilav_indeterminato = "unilav" in doc_lower and ("indeterminato" in doc_lower or "t.i." in doc_lower or "tempo indeterminato" in testo_lower or "a tempo indeterminato" in testo_lower)
+
+    if is_senza_scadenza or is_unilav_indeterminato:
+        return "Tempo Indeterminato", "🟢 In Regola"
 
     data_finale_str = data_scad_str
 
@@ -326,7 +335,7 @@ def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
         "visita", "medica", "medico", "lavoratore", "preposto", "dirigente", "antincendio", 
         "primo soccorso", "spazi confinati", "ple", "gru", "muletto", "carrello", "imbracatore", 
         "dpi", "consegna", "tesserino", "badge", "riconoscimento", "asl", "ispettorato", 
-        "dlgs 81", "formazione lavoratori", "formazione accordo stato regioni", "sorveglianza sanitaria", "unilav"
+        "dlgs 81", "formazione lavoratori", "formazione accordo stato regioni", "sorveglianza sanitaria", "unilav", "assunzione"
     ]
     
     if any(p in nome_lower for p in parole_chiave_sicurezza):
@@ -347,7 +356,7 @@ NOTA IMPORTANTE: Se nel testo NON riesci a identificare con certezza il Nome e C
 
 REGOLE PER DATE E SCADENZE:
 1. Data Emissione: GG/MM/AAAA oppure NON_PRESENTI.
-2. Data Scadenza: GG/MM/AAAA oppure NON_PRESENTI (Tesserini, DPI, UNILAV a tempo indeterminato = NON_PRESENTI).
+2. Data Scadenza: GG/MM/AAAA oppure "Tempo Indeterminato" (per UNILAV a tempo indeterminato, tesserini, DPI) oppure NON_PRESENTI.
 
 Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
 {{
@@ -356,7 +365,7 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
     "mansione": "Operaio/Preposto/ecc",
     "documento_nome": "Nome Specifico del Documento",
     "data_emissione": "GG/MM/AAAA oppure NON_PRESENTI",
-    "data_scadenza": "GG/MM/AAAA oppure NON_PRESENTI",
+    "data_scadenza": "GG/MM/AAAA oppure Tempo Indeterminato oppure NON_PRESENTI",
     "anni_validita": null,
     "prescrizione_medica": "Nessuna prescrizione rilevata"
 }}"""
@@ -390,14 +399,19 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
             return None, False
 
         mans_lav = (dati_ai.get("mansione") or "Operaio").strip().title()
-        doc_nome = (dati_ai.get("documento_nome") or "Attestato Generico").strip()
+        
+        # Normalizzazione intelligente del nome documento per evitare duplicati
+        doc_grezzo = dati_ai.get("documento_nome") or "Attestato Generico"
+        doc_nome = normalizza_nome_documento(doc_grezzo, testo_estratto)
+        
         data_em = dati_ai.get("data_emissione", "NON_PRESENTI")
 
         data_scad, stato_calc = calcola_stato_e_data_python(
             dati_ai.get("data_scadenza"),
             data_em,
             dati_ai.get("anni_validita"),
-            tipo_documento=doc_nome
+            tipo_documento=doc_nome,
+            testo_estratto=testo_estratto
         )
 
         prescr_raw = dati_ai.get("prescrizione_medica")
@@ -895,7 +909,7 @@ if azienda_selezionata:
                             
                             with st.form(key=f"form_modifica_{doc_id_selezionato}"):
                                 nuovo_nome_doc = st.text_input("Tipo Documento:", value=doc_row['tipo_documento'])
-                                nuova_data_scad = st.text_input("Data Scadenza (GG/MM/AAAA o T.I.):", value=str(doc_row['data_scadenza']))
+                                nuova_data_scad = st.text_input("Data Scadenza (GG/MM/AAAA, 'Tempo Indeterminato' o T.I.):", value=str(doc_row['data_scadenza']))
                                 
                                 if st.form_submit_button("💾 Salva Modifiche Documento"):
                                     data_scad_calc, nuovo_stato = calcola_stato_da_stringa_data(nuova_data_scad.strip())
@@ -918,7 +932,7 @@ if azienda_selezionata:
                         st.markdown("**Aggiungi Nuovo Documento Manuale:**")
                         with st.form(key=f"form_nuovo_doc_{lav_id}"):
                             nuovo_tipo = st.text_input("Nome Documento (es. UNILAV, Formazione Generica):")
-                            nuova_scad = st.text_input("Data Scadenza (es. 15/10/2027 o T.I.):")
+                            nuova_scad = st.text_input("Data Scadenza (es. 15/10/2027 o Tempo Indeterminato):")
                             
                             if st.form_submit_button("➕ Aggiungi Documento"):
                                 if nuovo_tipo.strip():
