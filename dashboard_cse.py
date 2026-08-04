@@ -292,8 +292,12 @@ def aggiorna_stato_generale_lavoratore(lavoratore_id, conn_esistente=None):
             cursor.execute("UPDATE lavoratori SET stato_scadenza_totale = ? WHERE id = ?", (nuovo_accesso, lavoratore_id))
             conn.commit()
 
+
+
+
+
 def aggiungi_lavoratore_manuale(azienda, nome_completo):
-    """Associa correttamente il dipendente all'ID o al nome dell'azienda selezionata."""
+    """Inserisce o aggiorna un dipendente associandolo alla corretta azienda nel DB."""
     nome_clean = nome_completo.strip().upper()
     azienda_clean = azienda.strip().upper()
     
@@ -303,39 +307,57 @@ def aggiungi_lavoratore_manuale(azienda, nome_completo):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         
-        # 1. Trova l'ID numerico dell'azienda se la tabella aziende esiste
-        id_azienda = azienda_clean
-        try:
-            cursor.execute("SELECT id FROM aziende WHERE UPPER(nome) = ? OR UPPER(ragione_sociale) = ?", (azienda_clean, azienda_clean))
-            res = cursor.fetchone()
-            if res:
-                id_azienda = res[0]
-        except Exception:
-            pass  # Se la tabella 'aziende' non c'è, mantiene il nome testuale
-
-        # 2. Se l'operaio esiste già (anche se mal associato), aggiorna la sua azienda
-        cursor.execute("SELECT id FROM lavoratori WHERE UPPER(nominativo) = ?", (nome_clean,))
-        lavoratore_esistente = cursor.fetchone()
+        # 1. Recupera la struttura della tabella lavoratori
+        cursor.execute("PRAGMA table_info(lavoratori)")
+        colonne_lav = [col[1] for col in cursor.fetchall()]
         
-        if lavoratore_esistente:
-            cursor.execute("UPDATE lavoratori SET azienda_id = ? WHERE UPPER(nominativo) = ?", (id_azienda, nome_clean))
-            conn.commit()
-            return True, f"✅ Operaio '{nome_clean}' aggiornato e associato a '{azienda_clean}'!"
+        col_az = "azienda_id" if "azienda_id" in colonne_lav else "azienda"
+        col_nome = "nominativo" if "nominativo" in colonne_lav else "nome_completo"
 
-        # 3. Se non esiste, lo inserisce da zero
+        # 2. Cerca l'ID o il valore esatto dell'azienda
+        valore_azienda = azienda_clean
         try:
-            cursor.execute(
-                "INSERT INTO lavoratori (azienda_id, nominativo, stato_scadenza_totale, mansione) VALUES (?, ?, ?, ?)",
-                (id_azienda, nome_clean, "🔴 Nessun Documento", "OPERAIO")
-            )
+            cursor.execute("PRAGMA table_info(aziende)")
+            colonne_az = [col[1] for col in cursor.fetchall()]
+            col_nome_az = next((c for c in colonne_az if c in ['nome', 'ragione_sociale', 'denominazione', 'azienda']), None)
+            
+            if col_nome_az and "id" in colonne_az:
+                cursor.execute(f"SELECT id FROM aziende WHERE UPPER({col_nome_az}) = ?", (azienda_clean,))
+                res = cursor.fetchone()
+                if res:
+                    valore_azienda = res[0]
+        except Exception:
+            pass
+
+        # 3. Se l'operaio esiste già (es. PROETTO ANGELO), aggiorna la sua associazione
+        cursor.execute(f"SELECT id FROM lavoratori WHERE UPPER({col_nome}) = ?", (nome_clean,))
+        esistente = cursor.fetchone()
+        
+        if esistente:
+            cursor.execute(f"UPDATE lavoratori SET {col_az} = ? WHERE UPPER({col_nome}) = ?", (valore_azienda, nome_clean))
+            conn.commit()
+            return True, f"✅ Operaio '{nome_clean}' aggiornato e associato con successo!"
+
+        # 4. Altrimenti inserisci da zero
+        try:
+            campi = [col_az, col_nome]
+            valori = [valore_azienda, nome_clean]
+            
+            if "stato_scadenza_totale" in colonne_lav:
+                campi.append("stato_scadenza_totale")
+                valori.append("🔴 Nessun Documento")
+            if "mansione" in colonne_lav:
+                campi.append("mansione")
+                valori.append("OPERAIO")
+
+            placeholders = ", ".join(["?"] * len(campi))
+            nomi_campi = ", ".join(campi)
+            
+            cursor.execute(f"INSERT INTO lavoratori ({nomi_campi}) VALUES ({placeholders})", valori)
             conn.commit()
             return True, f"✅ Operaio '{nome_clean}' aggiunto con successo a '{azienda_clean}'!"
         except Exception as e:
-            return False, f"Errore durante l'inserimento: {str(e)}"
-
-
-
-
+            return False, f"Errore salvataggio: {str(e)}"
 
 
 
@@ -830,6 +852,7 @@ if azienda_selezionata:
     st.markdown("# 🛡️ Dashboard CSE — Sistema di Controllo Integrato")
     st.markdown(f"### 🏢 Impresa in analisi: **{azienda_selezionata}**")
     st.write("---")
+
     
     with get_db_connection() as conn:
         cursor = conn.cursor()
