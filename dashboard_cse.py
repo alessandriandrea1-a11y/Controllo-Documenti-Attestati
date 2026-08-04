@@ -1014,7 +1014,26 @@ if azienda_selezionata:
                     else:
                         st.warning("Inserisci il nome e cognome del dipendente.")
     
-
+# ==================================================================
+    # 1. INCOLLA IL PASSAGGIO 2 PROPRIO QUI (SOPRA UNIFICAZIONE DUPLICATI)
+    # ==================================================================
+    if ha_permesso_modifica:
+        with st.expander(f"➕ Aggiungi manualmente un nuovo dipendente a {azienda_selezionata}"):
+            with st.form(key="form_nuovo_dipendente_manuale"):
+                nome_dipendente_input = st.text_input("Nome e Cognome Dipendente (es. PROETTO ANGELO)")
+                btn_salva = st.form_submit_button("💾 Salva Dipendente nel Database")
+                
+                if btn_salva:
+                    if nome_dipendente_input:
+                        esito, msg = aggiungi_lavoratore_manuale(azienda_selezionata, nome_dipendente_input)
+                        if esito:
+                            st.success(msg)
+                            st.cache_data.clear() # Pulisce la memoria temporanea
+                            st.rerun() # Ricarica subito la pagina
+                        else:
+                            st.error(msg)
+                    else:
+                        st.warning("Inserisci il nome e cognome del dipendente.")
 
     
     # --- UNIFICAZIONE DUPLICATI ---
