@@ -811,19 +811,16 @@ with st.sidebar:
     
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        
-# --- LETTURA SICURA AZIENDE ---
-try:
-    cursor.execute("PRAGMA table_info(aziende)")
-    colonne_az = [col[1] for col in cursor.fetchall()]
-    col_nome_az = next((c for c in colonne_az if c in ['nome', 'ragione_sociale', 'denominazione', 'azienda']), colonne_az[1] if len(colonne_az)>1 else 'id')
-    cursor.execute(f"SELECT {col_nome_az} FROM aziende ORDER BY {col_nome_az} ASC")
-    lista_aziende = [row[0] for row in cursor.fetchall()]
-except Exception:
-    cursor.execute("SELECT DISTINCT azienda_id FROM lavoratori")
-    lista_aziende = [row[0] for row in cursor.fetchall()]
-        lista_aziende = [riga[0] for riga in cursor.fetchall()]
-
+        # --- LETTURA SICURA AZIENDE ---
+        try:
+            cursor.execute("PRAGMA table_info(aziende)")
+            colonne_az = [col[1] for col in cursor.fetchall()]
+            col_nome_az = next((c for c in colonne_az if c in ['nome', 'ragione_sociale', 'denominazione', 'azienda']), colonne_az[1] if len(colonne_az)>1 else 'id')
+            cursor.execute(f"SELECT {col_nome_az} FROM aziende ORDER BY {col_nome_az} ASC")
+            lista_aziende = [riga[0] for riga in cursor.fetchall()]
+        except Exception:
+            cursor.execute("SELECT DISTINCT azienda_id FROM lavoratori")
+            lista_aziende = [riga[0] for riga in cursor.fetchall()]
     azienda_selezionata = st.selectbox("Seleziona l'azienda:", lista_aziende) if lista_aziende else None
         
     if ha_permesso_modifica:
