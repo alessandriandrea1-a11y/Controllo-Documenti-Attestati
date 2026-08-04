@@ -48,42 +48,35 @@ DURATA_CORSI_ANNI = {
     "rls": 1
 }
 
+# Parole chiave che indicano file AZIENDALI / NON RIFERITI A SINGOLI DIPENDENTI
+PAROLE_DA_SCARTARE_ASSOLUTE = [
+    "pos", "p.o.s", "piano operativo", "fattura", "fatture", "preventivo", 
+    "ordine", "ddt", "bolla", "contabilita", "estratto", "pagamento", 
+    "acconto", "saldo", "banca", "bonifico", "contratto", "computo", 
+    "durc", "dvr", "valutazione rischi", "visura", "targa", "libretto", 
+    "omologazione", "assicurazione", "verbale", "verbale cse", "nomina"
+]
+
 def pulisci_percorso_dropbox(percorso_input):
-    """
-    Pulisce e normalizza qualsiasi link o percorso Dropbox (compresi link condivisi o sottocartelle).
-    """
     if not percorso_input:
         return ""
-    
-    # Decodifica caratteri speciali tipo %20
     p = urllib.parse.unquote(str(percorso_input)).strip()
-    
-    # Rimuovi parametri query (es. ?dl=0, ?rlkey=...)
     if "?" in p:
         p = p.split("?")[0]
-        
     if "dropbox.com" in p:
-        # Estrai il percorso relativo dopo i domini/prefissi di Dropbox
         for pattern in ["/home", "/fo/", "/sh/", "/scl/fo/", "/scl/fi/"]:
             if pattern in p:
                 p = p.split(pattern)[-1]
                 break
-        # Se c'è ancora l'host completo, estrai solo la parte dopo il dominio
         if "dropbox.com" in p:
             parts = p.split("dropbox.com")
             p = parts[-1]
-
-    # Clean up di barre multiple o spazi residui
     p = p.strip()
     p = re.sub(r'/+', '/', p)
-    
     if p and not p.startswith("/"):
         p = "/" + p
-        
-    # Se il percorso è diventato solo "/" o vuoto, gestiscilo
     if p == "/":
         return ""
-        
     return p
 
 def estrai_nome_lavoratore_da_percorso(path_file):
@@ -91,7 +84,10 @@ def estrai_nome_lavoratore_da_percorso(path_file):
         parti = [p.strip() for p in path_file.split('/') if p.strip()]
         if len(parti) >= 2:
             cartella_padre = parti[-2]
-            cartelle_escluse = ["1. ditta", "2. dipendenti", "3. mezzi", "ditte", "attestati", "documenti", "pdf", "sub"]
+            cartelle_escluse = [
+                "1. ditta", "2. dipendenti", "3. mezzi", "ditte", "attestati", 
+                "documenti", "pdf", "sub", "pos", "durc", "generale", "sicurezza"
+            ]
             if not any(c in cartella_padre.lower() for c in cartelle_escluse) and len(cartella_padre) > 3:
                 return cartella_padre
     except Exception:
@@ -213,13 +209,30 @@ def registra_file_processato(path_file):
         cursor.execute("INSERT OR REPLACE INTO file_processati (path_file, data_elaborazione) VALUES (?, ?)", (path_file, now_str))
         conn.commit()
 
+def cancella_memoria_file_cartella(percorso_cartella):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        pattern = f"%{percorso_cartella.lower()}%"
+        cursor.execute("DELETE FROM file_processati WHERE LOWER(path_file) LIKE ?", (pattern,))
+        conn.commit()
+    upload_db_to_dropbox()
+
 def pulisci_nome_rigido(nome_grezzo):
     if not nome_grezzo:
         return "SCONOSCIUTO"
     nome = re.sub(r'\(.*?\)', '', str(nome_grezzo))
     nome = re.sub(r'[-–—]', ' ', nome)
     nome_pulito = re.sub(r'\s+', ' ', nome).strip().upper()
-    return nome_pulito if len(nome_pulito) > 3 else "SCONOSCIUTO"
+    
+    # Se il nome estratto è "SCONOSCIUTO" o troppo corto o contiene numeri/ditte, scarta
+    if len(nome_pulito) <= 3 or any(char.isdigit() for char in nome_pulito):
+        return "SCONOSCIUTO"
+        
+    parole_aziendali = ["SRL", "SPA", "SAS", "SNC", "EDIL", "COSTRUZIONI", "IMPRESA", "DITTA", "S.R.L."]
+    if any(p in nome_pulito for p in parole_aziendali):
+        return "SCONOSCIUTO"
+        
+    return nome_pulito
 
 def normalizza_nome_documento(tipo_doc, testo_estratto=""):
     t = (tipo_doc or "").upper().strip()
@@ -337,39 +350,41 @@ def calcola_stato_e_data_python(data_scad_str, data_emissione_str, anni_validita
     return calcola_stato_da_stringa_data(data_finale_str)
 
 def e_documento_sicurezza_pertinente(nome_file, testo_estratto):
+    """Filtro di pertinenza: accetta SOLO se si tratta di un documento relativo a un dipendente."""
     nome_lower = nome_file.lower()
     
-    parole_da_scartare = ["pos", "p.o.s", "piano operativo", "fattura", "fatture", "preventivo", "ordine", "ddt", "bolla", "contabilita", "estratto", "pagamento", "acconto", "saldo", "banca", "bonifico", "contratto", "computo"]
-    if any(p in nome_lower for p in parole_da_scartare):
+    # 1. Scarto immediato file aziendali
+    if any(p in nome_lower for p in PAROLE_DA_SCARTARE_ASSOLUTE):
         return False
 
-    parole_chiave_sicurezza = [
-        "attestato", "formazione", "corso", "sicurezza", "patentino", "idoneità", "idoneita", 
+    # 2. Parole chiave indispensabili (attestati/idoneità/documenti lavoratore)
+    parole_chiave_personale = [
+        "attestato", "formazione", "corso", "idoneità", "idoneita", 
         "visita", "medica", "medico", "lavoratore", "preposto", "dirigente", "antincendio", 
         "primo soccorso", "spazi confinati", "ple", "gru", "muletto", "carrello", "imbracatore", 
-        "dpi", "consegna", "tesserino", "badge", "riconoscimento", "asl", "ispettorato", 
-        "dlgs 81", "formazione lavoratori", "formazione accordo stato regioni", "sorveglianza sanitaria", "unilav", "assunzione"
+        "dpi", "tesserino", "badge", "riconoscimento", "sorveglianza sanitaria", "unilav", "assunzione"
     ]
     
-    if any(p in nome_lower for p in parole_chiave_sicurezza):
+    if any(p in nome_lower for p in parole_chiave_personale):
         return True
         
     testo_lower = (testo_estratto or "").lower()
-    match_testo = sum(1 for p in parole_chiave_sicurezza if p in testo_lower)
-    
-    return match_testo >= 1 or len(testo_estratto.strip()) == 0
+    if any(p in testo_lower for p in PAROLE_DA_SCARTARE_ASSOLUTE):
+        return False
+        
+    match_testo = sum(1 for p in parole_chiave_personale if p in testo_lower)
+    return match_testo >= 1
 
 def _esegui_chiamata_ai_e_salvataggio(testo_estratto, nome_file, path_univoco, client, azienda_selezionata):
     lavoratore_fallback = estrai_nome_lavoratore_da_percorso(path_univoco)
     
-    system_prompt = f"""Sei un esperto verificatore di documenti di cantiere e sicurezza sul lavoro (CSE).
-Analizza il testo estratto dal documento ed estrai con la massima precisione i dati del lavoratore e del documento.
+    system_prompt = f"""Sei un esperto verificatore di documenti di cantiere (CSE).
+Analizza il documento e determina SE E SOLO SE si tratta di un documento INDIVIDUALE di un LAVORATORE (Es. Attestato corso, Idoneità Medica, UNILAV, Tesserino).
 
-NOTA IMPORTANTE: Se nel testo NON riesci a identificare con certezza il Nome e Cognome del lavoratore, usa questo nome estratto dalla cartella: "{lavoratore_fallback or 'SCONOSCIUTO'}".
-
-REGOLE PER DATE E SCADENZE:
-1. Data Emissione: GG/MM/AAAA oppure NON_PRESENTI.
-2. Data Scadenza: GG/MM/AAAA oppure "Tempo Indeterminato" (per UNILAV a tempo indeterminato, tesserini, DPI) oppure NON_PRESENTI.
+REGOLE RIGIDE:
+1. Se il documento è aziendale (POS, DURC, Fattura, Contratto, Scheda Mezzo/Macchinario, Verbale), imposta "documento_pertinente": false.
+2. Se NON è presente un NOME E COGNOME di una persona fisica (lavoratore), imposta "documento_pertinente": false.
+3. Se "documento_pertinente" è false, lascia gli altri campi vuoti o null.
 
 Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
 {{
@@ -383,7 +398,7 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
     "prescrizione_medica": "Nessuna prescrizione rilevata"
 }}"""
 
-    prompt_user = f"Nome del File: {nome_file}\nPercorso: {path_univoco}\nTesto Estratto:\n{testo_estratto if testo_estratto else 'Immagine Scansionata senza testo leggibile'}"
+    prompt_user = f"Nome File: {nome_file}\nPercorso: {path_univoco}\nTesto Estratto:\n{testo_estratto if testo_estratto else 'Documento Senza Testo Estratto'}"
 
     try:
         response = client.chat.completions.create(
@@ -398,7 +413,8 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
         contenuto_risposta = response.choices[0].message.content
         dati_ai = json.loads(contenuto_risposta)
 
-        if not dati_ai.get("documento_pertinente", True):
+        # SE L'AI DICE CHE NON È UN DOCUMENTO DIPENDENTE -> SCARTA E NON SALVARE NULLA!
+        if not dati_ai.get("documento_pertinente", False):
             registra_file_processato(path_univoco)
             return None, False
 
@@ -407,6 +423,7 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
         if nom_lav == "SCONOSCIUTO" and lavoratore_fallback:
             nom_lav = pulisci_nome_rigido(lavoratore_fallback)
 
+        # Se ancora non abbiamo un nome di persona reale, scarta categoricamente
         if nom_lav == "SCONOSCIUTO":
             registra_file_processato(path_univoco)
             return None, False
@@ -482,8 +499,8 @@ Restituisci ESCLUSIVAMENTE un JSON valido con questo schema:
 def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client, azienda_selezionata):
     nome_lower = nome_file.lower()
     
-    parole_da_scartare = ["pos", "p.o.s", "piano operativo", "fattura", "fatture", "preventivo", "ordine", "ddt", "bolla", "contabilita", "estratto", "pagamento", "acconto", "saldo", "banca", "bonifico", "contratto", "computo"]
-    if any(p in nome_lower for p in parole_da_scartare):
+    # Scarto preventivo immediato
+    if any(p in nome_lower for p in PAROLE_DA_SCARTARE_ASSOLUTE):
         registra_file_processato(path_univoco)
         return None, False
 
@@ -493,16 +510,12 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
             with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
                 for filename in z.namelist():
                     if filename.lower().endswith(('.pdf', '.docx')) and not filename.startswith('__MACOSX'):
-                        sub_name_lower = filename.lower()
-                        if any(p in sub_name_lower for p in parole_da_scartare):
+                        if any(p in filename.lower() for p in PAROLE_DA_SCARTARE_ASSOLUTE):
                             continue
-                            
                         unzipped_bytes = z.read(filename)
                         sub_path = f"{path_univoco}/{filename}"
-                        
                         if e_file_gia_processato(sub_path):
                             continue
-                            
                         res, stopped = elabora_singolo_documento_con_ai(
                             file_bytes=unzipped_bytes, 
                             nome_file=os.path.basename(filename), 
@@ -515,7 +528,6 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
                         if res:
                             risultati.append(res)
                         time.sleep(0.05)
-            
             registra_file_processato(path_univoco)
             return f"ZIP elaborato ({len(risultati)} nuovi attestati trovati)", False
         except Exception as e:
@@ -529,18 +541,17 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
         messaggi_esito = []
         testo_totale_pdf = " ".join([p["testo"] for p in pagine])
         
+        # FILTRO STRETTO: Se non è un documento dipendente, ignora tutto il file!
         if not e_documento_sicurezza_pertinente(nome_file, testo_totale_pdf):
             registra_file_processato(path_univoco)
             return None, False
-        
+
         for pag in pagine:
             testo_estratto = pag["testo"]
             num_pag = pag["numero_pagina"]
-            
             sub_path_pag = f"{path_univoco}_pag_{num_pag}"
             if e_file_gia_processato(sub_path_pag):
                 continue
-                
             nome_file_pagina = f"{nome_file} (Pag. {num_pag})"
             esito_pag, stopped = _esegui_chiamata_ai_e_salvataggio(
                 testo_estratto=testo_estratto,
@@ -549,29 +560,24 @@ def elabora_singolo_documento_con_ai(file_bytes, nome_file, path_univoco, client
                 client=client,
                 azienda_selezionata=azienda_selezionata
             )
-            
             if stopped:
                 return esito_pag, True
             if esito_pag:
                 messaggi_esito.append(esito_pag)
             time.sleep(0.05)
-            
         registra_file_processato(path_univoco)
         if messaggi_esito:
             return " | ".join(messaggi_esito), False
         return None, False
-
     else:
         testo_estratto = ""
         try:
             testo_estratto = docx2txt.process(io.BytesIO(file_bytes))
         except Exception:
             testo_estratto = ""
-            
         if not e_documento_sicurezza_pertinente(nome_file, testo_estratto):
             registra_file_processato(path_univoco)
             return None, False
-            
         esito, stopped = _esegui_chiamata_ai_e_salvataggio(
             testo_estratto=testo_estratto,
             nome_file=nome_file,
@@ -625,31 +631,13 @@ with st.sidebar:
                 "messages": [{"role": "user", "content": "ping"}],
                 "max_tokens": 1
             }
-            
             resp_test = requests.post(url_test, headers=headers_test, json=body_test, timeout=10)
-            
             if resp_test.status_code == 200:
                 st.success("🟢 API Key Valida e Funzionante!")
-                
-                req_remaining_day = resp_test.headers.get("x-ratelimit-remaining-requests-day", "N/D")
-                req_limit_day = resp_test.headers.get("x-ratelimit-limit-requests-day", "14400")
-                req_remaining_min = resp_test.headers.get("x-ratelimit-remaining-requests-minute", "N/D")
-                tok_remaining_min = resp_test.headers.get("x-ratelimit-remaining-tokens-minute", "N/D")
-                
-                st.markdown(f"""
-                <div class="status-meter">
-                    📊 <b>Stato Richieste Groq (Rimanenti):</b><br/>
-                    • 📆 <b>Giornaliere (RPD):</b> {req_remaining_day} / {req_limit_day}<br/>
-                    • ⏱️ <b>Al Minuto (RPM):</b> {req_remaining_min}<br/>
-                    • 🔤 <b>Token Minuto (TPM):</b> {tok_remaining_min}
-                </div>
-                """, unsafe_allow_html=True)
             elif resp_test.status_code == 401:
                 st.error("🔴 API Key NON valida o disattivata.")
             elif resp_test.status_code == 429:
                 st.warning("🟡 Limite di token/minuto raggiunto. Attendi circa 60 secondi.")
-            else:
-                st.warning(f"⚠️ Errore test API: {resp_test.status_code}")
         except Exception as e_test:
             st.error(f"⚠️ Impossibile verificare la chiave: {e_test}")
 
@@ -706,12 +694,6 @@ with st.sidebar:
                 upload_db_to_dropbox()
                 st.success("Azienda eliminata!")
                 st.rerun()
-                    
-        st.write("---")
-        st.markdown("### 📤 UPLOAD MANUALE (PDF, DOCX, ZIP)")
-        file_caricato = st.file_uploader("Carica File o Archivio ZIP", type=["pdf", "docx", "zip"], key=f"uploader_{st.session_state['uploader_key']}")
-    else:
-        file_caricato = None
 
 # --- DASHBOARD PRINCIPALE ---
 if azienda_selezionata:
@@ -736,14 +718,12 @@ if azienda_selezionata:
             sottocartella_specifica = st.text_input(
                 "Sottocartella dipendente o link specifico:", 
                 value="", 
-                placeholder="Es. Mario Rossi oppure /Cantiere/Mario Rossi o incolla il link Dropbox"
+                placeholder="Es. Mario Rossi oppure /Cantiere/Mario Rossi"
             ).strip()
             
-            # Calcolo percorso da scansionare
             if sottocartella_specifica:
                 sub_pulita = pulisci_percorso_dropbox(sottocartella_specifica)
                 if sub_pulita.startswith("/") and percorso_dropbox_ditta:
-                    # Se l'utente inserisce un percorso relativo es. /Mario Rossi o un link
                     if sub_pulita.startswith(percorso_dropbox_ditta):
                         percorso_da_usare = sub_pulita
                     else:
@@ -760,15 +740,16 @@ if azienda_selezionata:
             if percorso_da_usare:
                 st.caption(f"🔍 Percorso effettivo di scansione: `{percorso_da_usare}`")
                 
-                col_Avvia, col_Stop = st.columns(2)
+                col_Avvia, col_Reset = st.columns(2)
                 with col_Avvia:
                     avvia_scansione = st.button("🚀 SCANSIONA / RIPRENDI")
-                with col_Stop:
-                    ferma_scansione = st.button("🛑 INTERROMPI SCANSIONE")
+                with col_Reset:
+                    reset_memoria = st.button("🔄 RESETTA MEMORIA E RISCANSIONA")
 
-                if ferma_scansione:
-                    st.session_state["scansione_in_corso"] = False
-                    st.warning("⚠️ Richiesta di interruzione registrata.")
+                if reset_memoria:
+                    cancella_memoria_file_cartella(percorso_da_usare)
+                    st.success(f"🧹 Memoria file cancellata per `{percorso_da_usare}`! Ora puoi lanciare la scansione.")
+                    st.session_state["scansione_in_corso"] = True
 
                 if avvia_scansione:
                     st.session_state["scansione_in_corso"] = True
@@ -785,11 +766,9 @@ if azienda_selezionata:
                         with st.spinner(f"📦 Scansione della cartella `{percorso_da_usare}` in corso..."):
                             client = Groq(api_key=api_key_inserita)
                             try:
-                                # Tentativo di lettura ricorsiva
                                 try:
                                     res = dbx.files_list_folder(percorso_da_usare, recursive=True)
                                 except dropbox.exceptions.ApiError as path_err:
-                                    # Fallback: prova senza slash iniziale o con ricerca flessibile
                                     if "not_found" in str(path_err).lower():
                                         percorso_alt = percorso_da_usare.lstrip("/")
                                         res = dbx.files_list_folder(percorso_alt, recursive=True)
@@ -797,7 +776,6 @@ if azienda_selezionata:
                                         raise path_err
 
                                 file_list = res.entries
-                                
                                 while res.has_more:
                                     res = dbx.files_list_folder_continue(res.cursor)
                                     file_list.extend(res.entries)
@@ -808,10 +786,6 @@ if azienda_selezionata:
                                 bloccato_per_limit = False
                                 
                                 for entry in file_list:
-                                    if not st.session_state["scansione_in_corso"]:
-                                        st.info("🛑 Scansione interrotta manualmente dall'utente.")
-                                        break
-
                                     if isinstance(entry, dropbox.files.FileMetadata):
                                         if entry.name.lower().endswith(('.pdf', '.docx', '.zip')):
                                             path_univoco = entry.path_lower
@@ -820,8 +794,7 @@ if azienda_selezionata:
                                                 gia_presenti += 1
                                                 continue
                                                 
-                                            parole_da_scartare = ["pos", "p.o.s", "piano operativo", "fattura", "preventivo"]
-                                            if any(p in entry.name.lower() for p in parole_da_scartare):
+                                            if any(p in entry.name.lower() for p in PAROLE_DA_SCARTARE_ASSOLUTE):
                                                 registra_file_processato(path_univoco)
                                                 scartati += 1
                                                 continue
@@ -847,21 +820,23 @@ if azienda_selezionata:
                                                 if msg_esito:
                                                     st.write(msg_esito)
                                                     processed += 1
+                                                else:
+                                                    scartati += 1
                                             except Exception as err_file:
                                                 st.error(f"Errore lettura {entry.name}: {err_file}")
 
                                 if not bloccato_per_limit:
-                                    st.success(f"✅ Scansione completata! Processati: {processed} file nuovi, Già presenti: {gia_presenti}, Scartati: {scartati}.")
+                                    st.success(f"✅ Scansione completata! Processati: {processed} file nuovi, Già presenti: {gia_presenti}, Scartati/Aziendali: {scartati}.")
                                     st.session_state["scansione_in_corso"] = False
                                     st.rerun()
 
                             except Exception as e_dbx:
                                 st.error(f"❌ Impossibile trovare la cartella su Dropbox `{percorso_da_usare}`: {e_dbx}")
-                                st.info("💡 Suggerimento: Verifica se il nome della sottocartella o del dipendente coincide perfettamente con la struttura su Dropbox.")
                                 st.session_state["scansione_in_corso"] = False
 
         with c_right:
             st.markdown("#### 📄 Upload Manuale Documento Singolo")
+            file_caricato = st.file_uploader("Carica attestato PDF/DOCX:", type=["pdf", "docx"], key=f"uploader_{st.session_state['uploader_key']}")
             if file_caricato and api_key_inserita:
                 if st.button("🔍 ANALIZZA ED ESESEGUI UPLOAD"):
                     with st.spinner("Analisi AI ed estrazione in corso..."):
@@ -878,10 +853,12 @@ if azienda_selezionata:
                         )
                         if is_rate_limit:
                             st.error(msg_esito)
-                        else:
-                            st.success(f"✅ {msg_esito or 'Documento processato.'}")
+                        elif msg_esito:
+                            st.success(f"✅ {msg_esito}")
                             st.session_state["uploader_key"] += 1
                             st.rerun()
+                        else:
+                            st.warning("⚠️ Il documento caricato non è stato riconosciuto come attestato/documento personale di un lavoratore.")
 
     st.write("---")
     
