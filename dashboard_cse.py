@@ -293,24 +293,51 @@ def aggiorna_stato_generale_lavoratore(lavoratore_id, conn_esistente=None):
             conn.commit()
 
 def aggiungi_lavoratore_manuale(azienda, nome_completo):
-    """Inserisce manualmente un dipendente nel database."""
-    nome_clean = nome_completo.strip()
-    azienda_clean = azienda.strip()
+    """Inserisce manualmente un dipendente evitando conflitti e OperationalError di SQLite."""
+    # Convertiamo in maiuscolo e puliamo gli spazi per omogeneità con le scansioni OCR
+    nome_clean = nome_completo.strip().upper()
+    azienda_clean = azienda.strip().upper()
     
     if not nome_clean or not azienda_clean:
         return False, "Nome dipendente e Azienda sono obbligatori."
     
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        
+        # 1. Verifica preventiva: controlla se l'operaio esiste già per evitare blocchi DB
+        cursor.execute(
+            "SELECT COUNT(*) FROM lavoratori WHERE UPPER(azienda) = ? AND UPPER(nome_completo) = ?",
+            (azienda_clean, nome_clean)
+        )
+        if cursor.fetchone()[0] > 0:
+            return False, f"⚠️ L'operaio '{nome_clean}' è già presente per l'azienda '{azienda_clean}'."
+
+        # 2. Controllo dinamico della struttura delle colonne
+        cursor.execute("PRAGMA table_info(lavoratori)")
+        colonne = [col[1] for col in cursor.fetchall()]
+        
         try:
-            cursor.execute(
-                "INSERT INTO lavoratori (azienda, nome_completo, stato_scadenza_totale) VALUES (?, ?, ?)",
-                (azienda_clean, nome_clean, "🔴 Nessun Documento")
-            )
+            # 3. Inserimento sicuro
+            if "stato_scadenza_totale" in colonne:
+                cursor.execute(
+                    "INSERT INTO lavoratori (azienda, nome_completo, stato_scadenza_totale) VALUES (?, ?, ?)",
+                    (azienda_clean, nome_clean, "🔴 Nessun Documento")
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO lavoratori (azienda, nome_completo) VALUES (?, ?)",
+                    (azienda_clean, nome_clean)
+                )
+                
             conn.commit()
-            return True, f"Dipendente '{nome_clean}' aggiunto con successo a '{azienda_clean}'."
+            return True, f"✅ Operaio '{nome_clean}' aggiunto con successo a '{azienda_clean}'!"
+            
         except sqlite3.IntegrityError:
-            return False, f"Il dipendente '{nome_clean}' esiste già per l'azienda '{azienda_clean}'."
+            return False, f"⚠️ L'operaio '{nome_clean}' è già registrato nel sistema."
+        except sqlite3.OperationalError as e:
+            # In caso di errore specifico della tabella SQLite, riporta il dettaglio senza crashare l'app
+            return False, f"Errore DB (verificare nome colonna): {str(e)}"
+
 
 def unifica_tutti_i_duplicati_azienda(azienda_nome):
     with get_db_connection() as conn:
